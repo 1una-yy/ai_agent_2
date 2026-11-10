@@ -1,0 +1,163 @@
+{
+  "dciso": {
+    "policy_version": "v0.1.0",
+    "schema": {
+      "supported_versions": ["0.1.0"]
+    },
+    "_comment_harness": "Layer 1 (LiteLLM interception) governs any OpenAI-compatible agent. The generic adapter stamps one of these; an unrecognised harness_type is normalised to 'openai-compatible'.",
+    "known_harness_types": [
+      "hermes", "openai-compatible", "openai", "generic", "langchain",
+      "langgraph", "autogen", "crewai", "claude-code", "cursor", "aider",
+      "continue", "openai-agents-sdk", "llamaindex", "semantic-kernel"
+    ],
+    "known_event_types": ["agent.spawn", "tool.execute.proposed", "tool.result.proposed", "model.output.proposed"],
+
+    "sensitive_data_classes": ["PHI", "PII", "SECRET"],
+
+    "egress_policy": {
+      "_comment": "Phase B — a tool result about to be sent to a model endpoint. 'Local read' is not 'may ship to an external model'. Destination class: local (LAN/self-hosted), approved (company-sanctioned), external (anything else). Fast path: local dest + no scan hit + not oversize -> ALLOW without OPA/CISO.",
+      "enabled": true,
+      "default_dest_class": "external",
+      "route_mode_dest_class": {"ollama": "local", "proxy": "approved", "demo": "external", "test": "local"},
+      "approved_model_markers": [],
+      "sensitive_field_markers": ["password", "passwd", "secret", "api_key", "apikey", "private_key", "ssn", "social security", "credit card", "身分證", "健保", "病歷", "銀行帳號"],
+      "forbidden_markers": ["INTERNAL ONLY", "DO NOT DISTRIBUTE", "機密", "限內部使用", "不得外流"],
+      "class_rules": {
+        "local":    {"max_result_kb": 4096, "redact_credentials": true,  "block_forbidden": false, "block_if_sensitive_task": false, "block_sensitive_fields": false},
+        "approved": {"max_result_kb": 1024, "redact_credentials": true,  "block_forbidden": true,  "block_if_sensitive_task": false, "block_sensitive_fields": false},
+        "external": {"max_result_kb": 256,  "redact_credentials": true,  "block_forbidden": true,  "block_if_sensitive_task": true,  "block_sensitive_fields": true}
+      },
+      "withheld_notice": "[治理] 這段工具結果因含受限內容或超出政策範圍，未送往模型。請縮小工具的查詢範圍，或改用去識別化的方式取得所需資訊。"
+    },
+
+    "output_policy": {
+      "_comment": "Phase A — governance of a model's final answer before delivery. Fast path: no scan hit + non-sensitive task + non-external recipient -> ALLOW without consulting the CISO. Otherwise OPA decides on the pre-computed scan signals (credential/forbidden counts + recipient class), never the raw text.",
+      "enabled": true,
+      "forbidden_markers": ["INTERNAL ONLY", "DO NOT DISTRIBUTE", "ATTORNEY-CLIENT PRIVILEGED", "機密", "限內部使用", "不得外流"],
+      "credential_hit_action": "REDACT",
+      "forbidden_hit_action": "DENY",
+      "recipient_classes": ["user", "shared", "external"],
+      "external_recipient_blocks_classes": ["PHI", "PII", "SECRET", "confidential", "internal"],
+      "escalate_to_ciso_on": ["forbidden_hit", "sensitive_task", "external_recipient"]
+    },
+
+    "shell": {
+      "_comment": "Command-level policy for terminal/shell tools. A shell call is ALLOWED only if it is a single simple invocation of a read-only binary with no shell metacharacters and no blocked substring. Destructive commands stay DENIED; anything ambiguous -> REQUIRE_REVIEW.",
+      "tools": ["terminal", "shell", "sh", "bash", "zsh", "powershell", "cmd", "exec", "execute", "execute_command", "run_command", "run_shell", "shell_exec", "command", "system"],
+      "arg_keys": ["command", "cmd", "commands", "script", "input", "code"],
+      "readonly_binaries": ["ls", "ll", "dir", "cat", "bat", "less", "more", "head", "tail", "pwd", "cd", "find", "fd", "tree", "stat", "file", "wc", "du", "df", "grep", "rg", "ag", "which", "type", "whoami", "id", "groups", "hostname", "uname", "date", "cal", "echo", "printf", "env", "printenv", "ps", "top", "free", "uptime", "lsblk", "lscpu", "readlink", "realpath", "basename", "dirname", "md5sum", "sha256sum", "sort", "uniq", "cut", "awk", "sed", "jq", "yq", "column", "nl", "tac", "diff", "cmp"],
+      "destructive_binaries": ["rm", "rmdir", "unlink", "shred", "mv", "cp", "dd", "mkfs", "truncate", "tee", "curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "rsync", "sudo", "su", "kill", "pkill", "killall", "reboot", "shutdown", "halt", "poweroff", "systemctl", "service", "apt", "apt-get", "yum", "dnf", "brew", "pacman", "docker", "kubectl", "crontab", "at", "mount", "umount", "iptables", "ufw", "passwd", "useradd", "userdel", "usermod", "chmod", "chown", "chgrp", "eval", "exec", "source", "chattr", "setfacl", "ln"],
+      "destructive_patterns": ["rm -rf", "rm -fr", ":(){", "> /dev/", "mkfs", "git push", "git reset --hard", "git clean", "pip install", "pip3 install", "npm install", "npm i ", "yarn add", "pnpm add", "history -c", "chmod +x", "chmod 777"],
+      "metachars": [";", "|", "&", "$(", "`", "\n", "\r", "\\", " > ", " >> ", "||", "&&", "$(", ">/"]
+    },
+
+    "path_policy": {
+      "_comment": "Phase C — target-path checks for file tools and shell commands, applied at BOTH the model-proposal and execution-pre-dispatch phases. denied_markers: never touch. execute_from_markers + interpreters: running a program out of a scratch/download dir -> deny (the 'ran a downloaded program' case). workspace_roots (or DCISO_WORKSPACE_ROOTS env, merged): if non-empty, a write/delete outside them -> REQUIRE_REVIEW.",
+      "path_arg_keys": ["path", "file", "filename", "target", "dest", "destination", "dir", "directory", "output", "src", "source"],
+      "denied_markers": [".ssh", "id_rsa", "id_ed25519", ".aws/credentials", ".aws\\credentials", "/etc/shadow", "/etc/sudoers", ".env", ".git/config", ".gitconfig", ".npmrc", ".pypirc", ".docker/config", ".kube/config", ".netrc", "authorized_keys", "known_hosts", "wallet.dat", ".bash_history", ".zsh_history"],
+      "interpreters": ["python", "python3", "bash", "sh", "zsh", "node", "ruby", "perl", "php", "deno", "bun", "./"],
+      "execute_from_markers": ["/tmp/", "/var/tmp/", "/dev/shm/", "downloads/", "download/", "/private/tmp/", "\\temp\\", "\\downloads\\"],
+      "write_tools": ["write_file", "edit_file", "create_file", "patch", "apply_patch", "str_replace", "delete_file", "rm", "rmdir", "move_file", "mv"],
+      "workspace_roots": []
+    },
+
+    "ifc": {
+      "_comment": "ACS-aligned information-flow control (docs/hard-policy-and-agt.md L2). Lattice public<internal<confidential<secret. 'No write down': deny if any source label outranks the sink clearance.",
+      "lattice": {"public": 0, "internal": 1, "confidential": 2, "secret": 3},
+      "data_class_clearance": {"public": 0, "internal": 1, "PII": 2, "PHI": 2, "SECRET": 3},
+      "internal_destination_clearance": 2,
+      "external_destination_clearance": 1,
+      "null_destination_clearance": 3,
+      "_note_external": "external/unknown sink clearance = 'internal'(1): confidential/secret data is blocked from leaving, plain internal data is not. Set to 0 to also block internal-classified egress."
+    },
+
+    "approved_internal_destinations": [
+      "internal://approved-store",
+      "internal://data-lake",
+      "localhost",
+      "mock-llm"
+    ],
+
+    "capability_ceiling": {
+      "C0": "L0",
+      "C1": "L1",
+      "C2": "L2",
+      "C3": "L3",
+      "C4": "L4"
+    },
+    "autonomy_ladder": ["L0", "L1", "L2", "L3", "L4"],
+
+    "tools": {
+      "_comment": "Canonical tool-name classes. Real harnesses use many names for the same capability — keep these lists broad. Anything not listed -> UNKNOWN_TOOL -> default-deny.",
+      "read_only": [
+        "read_file", "read", "cat", "view_file", "open_file", "get_file",
+        "list_files", "list_dir", "ls", "glob", "find_files",
+        "search", "grep", "ripgrep", "code_search", "search_files",
+        "get_url_metadata", "web_search", "fetch_url_readonly"
+      ],
+      "review_required": [
+        "send_email", "send_message", "post_message", "email",
+        "http_request", "http_get", "web_request", "fetch", "curl",
+        "browser", "browse", "open_url", "navigate",
+        "write_file", "edit_file", "create_file", "patch", "apply_patch", "str_replace"
+      ],
+      "deny": [
+        "terminal", "shell", "sh", "bash", "zsh", "powershell", "cmd",
+        "exec", "execute", "execute_command", "run_command", "run_shell",
+        "shell_exec", "command", "system", "subprocess", "process",
+        "write_file_unrestricted", "patch_unrestricted", "rm", "delete_file", "rmdir",
+        "db_write", "database_execute", "sql_execute", "query_database", "sql",
+        "credential_access", "read_secrets", "get_secret", "read_env", "dump_env",
+        "network.egress", "exfiltrate", "upload", "ssh", "scp"
+      ]
+    },
+
+    "default_obligations": {
+      "read_only": true,
+      "max_autonomy": "L1",
+      "max_subagent_depth": 0,
+      "allowed_tools": ["read_file", "list_files", "search"],
+      "denied_tools": ["terminal", "shell", "send_email", "db_write", "credential_access"]
+    },
+
+    "_comment_agt": "Alignment metadata for Microsoft Agent Governance Toolkit / ACS. Pure reference data — not read by agent_governance.rego, does not affect decisions. See docs/hard-policy-and-agt.md.",
+
+    "acs_crosswalk": {
+      "verdicts": {
+        "ALLOW": "allow",
+        "DENY": "deny",
+        "MODIFY": "transform",
+        "REQUIRE_REVIEW": "escalate"
+      },
+      "fail_closed_reason_to_acs": {
+        "UNKNOWN_TOOL": "runtime_error:tool_unknown",
+        "UNKNOWN_HARNESS": "runtime_error:manifest_invalid",
+        "UNKNOWN_EVENT_TYPE": "runtime_error:intervention_point_unknown",
+        "SCHEMA_VERSION_UNSUPPORTED": "runtime_error:manifest_invalid",
+        "HARD_PDP_UNREACHABLE": "runtime_error:policy_invocation_failed",
+        "HARD_PDP_HTTP_ERROR": "runtime_error:policy_invocation_failed",
+        "HARD_PDP_UNDEFINED_DECISION": "runtime_error:policy_output_invalid",
+        "HARD_PDP_NO_DECISION_FIELD": "runtime_error:policy_output_invalid",
+        "HARD_PDP_SCHEMA_MISMATCH": "runtime_error:policy_output_invalid",
+        "SOFT_ADVICE_UNAVAILABLE_SENSITIVE": "runtime_error:annotation_timeout",
+        "SOFT_ADVICE_MISSING_SENSITIVE": "runtime_error:annotation_failed",
+        "AUDIT_WRITE_FAILED": "runtime_error:resource_limit_exceeded",
+        "APPROVAL_TOKEN_FINGERPRINT_MISMATCH": "runtime_error:approval_action_mismatch"
+      },
+      "ifc_lattice": ["public", "internal", "confidential", "secret"],
+      "data_class_to_ifc": {"internal": "internal", "PII": "confidential", "PHI": "confidential", "SECRET": "secret"}
+    },
+
+    "owasp_agentic_top10": {
+      "EXTERNAL_SENSITIVE_TRANSFER_DENIED": ["AAI002_tool_misuse", "AAI006_excessive_agency", "LLM02_sensitive_information_disclosure"],
+      "DANGEROUS_TOOL_DENIED": ["AAI002_tool_misuse", "AAI006_excessive_agency"],
+      "CHILD_GRANT_EXCEEDS_PARENT": ["AAI003_privilege_compromise", "AAI005_cascading_failures"],
+      "PARENT_MAY_NOT_SPAWN": ["AAI003_privilege_compromise"],
+      "AUTONOMY_OVER_CEILING_NO_SAFE_DOWNGRADE": ["AAI006_excessive_agency"],
+      "AUTONOMY_DOWNGRADED_TO_CEILING": ["AAI006_excessive_agency"],
+      "UNKNOWN_TOOL": ["AAI002_tool_misuse", "AAI009_untraceability"],
+      "UNKNOWN_HARNESS": ["AAI009_untraceability"],
+      "SOFT_ADVICE_DENY_CRITICAL": ["AAI001_memory_poisoning", "AAI004_intent_manipulation"]
+    }
+  }
+}

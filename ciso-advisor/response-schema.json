@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SoftAdvice",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["advice", "risk_score", "risk_level", "reason_codes", "explanation", "suggested_obligations"],
+  "properties": {
+    "advice": {"enum": ["ALLOW", "DENY", "MODIFY", "REQUIRE_REVIEW"]},
+    "risk_score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "risk_level": {"enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
+    "reason_codes": {"type": "array", "items": {"type": "string", "maxLength": 64}},
+    "explanation": {"type": "string", "maxLength": 800},
+    "suggested_obligations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "read_only": {"type": "boolean"},
+        "max_autonomy": {"type": "string", "pattern": "^L[0-4]$"},
+        "max_subagent_depth": {"type": "integer", "minimum": 0},
+        "allowed_tools": {"type": "array", "items": {"type": "string"}},
+        "denied_tools": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "availability": {"enum": ["OK", "UNAVAILABLE", "UNPARSEABLE"]}
+  }
+}

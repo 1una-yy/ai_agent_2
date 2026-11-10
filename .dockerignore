@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+.tools
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+demo
+docs
+.hermes-governed-test
+hermes/hermes-agent
+hermes/_download
+*.sqlite
+data
+.env

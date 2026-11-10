@@ -1,0 +1,35 @@
+# LiteLLM proxy config — the Governance Gateway / Model-side PEP.
+#
+# Hermes points its OpenAI-compatible base_url at this proxy and calls the
+# single model alias `governed-model`. The real upstream (OpenAI in demo mode,
+# mock-llm in test mode) is resolved by gateway/entrypoint.sh into the
+# GATEWAY_UPSTREAM_* env vars below. The real provider key lives ONLY here.
+
+model_list:
+  # Explicit alias Hermes is told to use.
+  - model_name: governed-model
+    litellm_params:
+      model: os.environ/GATEWAY_UPSTREAM_MODEL
+      api_base: os.environ/GATEWAY_UPSTREAM_API_BASE
+      api_key: os.environ/GATEWAY_UPSTREAM_API_KEY
+  # Wildcard: ANY model name a client asks for is routed to the one governed
+  # upstream. A governance gateway must not be side-steppable by model name —
+  # `openai/governed-model`, `gpt-4o`, anything, all get governed.
+  - model_name: "*"
+    litellm_params:
+      model: os.environ/GATEWAY_UPSTREAM_MODEL
+      api_base: os.environ/GATEWAY_UPSTREAM_API_BASE
+      api_key: os.environ/GATEWAY_UPSTREAM_API_KEY
+
+litellm_settings:
+  # The governance interception entry point. Points at the INSTANCE.
+  callbacks: gateway.callbacks.governance_callback.governance_handler_instance
+  drop_params: true
+  # MVP governs non-streaming only; refuse silent streaming fallthrough.
+  # (Hermes profile in this repo sets stream=false.)
+  set_verbose: false
+  request_timeout: 120
+
+general_settings:
+  master_key: os.environ/GATEWAY_MASTER_KEY
+  # Hermes authenticates with GATEWAY_MASTER_KEY; it never sees a provider key.

@@ -1,0 +1,119 @@
+# DCISO Governance Gateway — local PoC (ticket §10 Task 1).
+# All images pinned. No real secrets in this file — see .env (from .env.example).
+#
+# Route mode is controlled by GATEWAY_ROUTE_MODE in .env:
+#   test -> mock-llm (offline, deterministic)   | `make up`
+#   demo -> real OpenAI (needs OPENAI_API_KEY)  | `make demo-up`
+
+name: dciso-gw
+
+services:
+  opa:
+    image: openpolicyagent/opa:1.19.0
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=info"
+      - "--set=decision_logs.console=true"
+      - "--ignore=tests"
+      - "/policy"
+    volumes:
+      - ./policy:/policy:ro
+    ports:
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      # readiness: the decision path must actually be loaded, not just "up"
+      test: ["CMD", "sh", "-c",
+             "wget -qO- --post-data='{}' --header=Content-Type:application/json http://127.0.0.1:8181/v1/data/dciso/governance | grep -q result"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ciso-advisor:
+    build: ./ciso-advisor
+    image: dciso/ciso-advisor:0.1.0
+    environment:
+      CISO_MODE: ${CISO_MODE:-rule}
+      CISO_LLM_MODEL: ${CISO_LLM_MODEL:-openai/gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    # No ports published: only the Gateway talks to it, on the internal network.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/health/policy').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mock-llm:
+    build: ./mock-llm
+    image: dciso/mock-llm:0.1.0
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health/liveness').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: dciso/gateway:0.1.0
+    depends_on:
+      opa:
+        condition: service_healthy
+      ciso-advisor:
+        condition: service_healthy
+      mock-llm:
+        condition: service_started
+    environment:
+      GATEWAY_ROUTE_MODE: ${GATEWAY_ROUTE_MODE:-test}
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY:-hermes-to-gateway-token-CHANGE_ME}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      GATEWAY_UPSTREAM_MODEL: ${GATEWAY_UPSTREAM_MODEL:-}
+      OPA_URL: http://opa:8181
+      OPA_DECISION_PATH: dciso/governance/decision
+      OPA_TIMEOUT_SECONDS: ${OPA_TIMEOUT_SECONDS:-3}
+      CISO_ADVISOR_URL: http://ciso-advisor:9000
+      CISO_TIMEOUT_SECONDS: ${CISO_TIMEOUT_SECONDS:-4}
+      AUDIT_DB_PATH: /data/audit.sqlite
+      REPLAN_MAX_ATTEMPTS: ${REPLAN_MAX_ATTEMPTS:-2}
+      GOVERNANCE_APPROVAL_SECRET: ${GOVERNANCE_APPROVAL_SECRET:-}
+      ALLOW_UNGOVERNED_STREAMING: ${ALLOW_UNGOVERNED_STREAMING:-0}
+      GOV_DEFAULT_AUTONOMY: ${GOV_DEFAULT_AUTONOMY:-L1}
+      GOV_DEFAULT_CAPABILITY: ${GOV_DEFAULT_CAPABILITY:-C1}
+    volumes:
+      - audit-data:/data
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness').status==200 else 1)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  viewer:
+    build: ./viewer
+    image: dciso/viewer:0.1.0
+    depends_on:
+      - gateway
+    environment:
+      AUDIT_DB_PATH: /data/audit.sqlite
+    volumes:
+      - audit-data:/data:ro
+    ports:
+      # localhost only — never expose the dashboard publicly
+      - "127.0.0.1:8900:8900"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8900/health/liveness').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+volumes:
+  audit-data:

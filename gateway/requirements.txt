@@ -1,0 +1,4 @@
+# Gateway governance core (imported by the LiteLLM proxy container).
+# LiteLLM itself ships pydantic v2 + httpx; these pins are for standalone tests.
+pydantic==2.11.7
+httpx==0.28.1

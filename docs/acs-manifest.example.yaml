@@ -1,0 +1,59 @@
+# Example Agent Control Specification (ACS) manifest that binds THIS project's
+# hard policy as an ACS `rego` policy. Reference only — Level 3 of
+# docs/hard-policy-and-agt.md. Validate against AGT's
+# policy-engine/spec/schema/manifest.schema.json before use.
+#
+# With this manifest, any ACS runtime (AGT Rust policy-engine, or an SDK
+# AgentControl) runs agent_governance.rego unchanged, with the CISO advisor as
+# an `llm` annotator.
+
+version: "1.0"
+
+metadata:
+  name: dciso-governance
+  owner: your-org
+
+annotators:
+  ciso:
+    type: llm
+    # OpenAI-compatible; the CISO advisor service also works if wrapped as one.
+    provider: openai_compatible
+    base_url: http://ciso-advisor:9000/v1   # or the real advisor endpoint
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+    system_prompt_file: ../ciso-advisor/system-prompt.txt
+    # Output is normalized to a JSON annotation and lands under annotations.ciso;
+    # a malformed/timed-out annotation fails closed (deny).
+
+policies:
+  hard:
+    type: rego
+    bundle: ../policy/                      # this directory (agent_governance.rego + data.json)
+    query: data.dciso.governance.decision
+
+intervention_points:
+  pre_tool_call:
+    policy_target: input.snapshot.proposed_action
+    policy_target_kind: proposed_action
+    tool_name_from: input.snapshot.proposed_action.canonical_name
+    annotations:
+      ciso:
+        from: input.snapshot            # send the (minimized) event to the annotator
+    policy:
+      id: hard
+
+  pre_subagent_spawn:
+    policy_target: input.snapshot.proposed_action
+    policy_target_kind: proposed_action
+    annotations:
+      ciso:
+        from: input.snapshot
+    policy:
+      id: hard
+
+# Verdict mapping (ACS -> this project), see docs/hard-policy-and-agt.md:
+#   allow      -> ALLOW
+#   deny       -> DENY
+#   transform  -> MODIFY   (transform replaces policy_target with rewritten args)
+#   escalate   -> REQUIRE_REVIEW
+#   any runtime_error:* -> DENY (fail closed)

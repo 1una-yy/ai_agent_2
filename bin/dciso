@@ -1,0 +1,603 @@
+#!/usr/bin/env bash
+# dciso — one command to run the DCISO Governance Gateway and to plug / unplug
+# the AI CISO in front of a Hermes agent.
+#
+#   dciso setup            first-time setup (docker check, .env, keys)
+#   dciso up               start the governance stack (offline test mode)
+#   dciso demo             start in demo mode (real OpenAI; needs OPENAI_API_KEY)
+#   dciso login [nous|xai] log in to a provider (OAuth) for the proxy route
+#   dciso proxy start|stop|status   manage the local `hermes proxy` (login auth)
+#   dciso up-proxy         start the stack routed through `hermes proxy` (real
+#                          model via your login — no static API key)
+#   dciso up-ollama [model] [--ciso rule|llm] [--ciso-model M] [--agent generic]
+#                            route the stack to a LAN/local Ollama server
+#                            (OLLAMA_BASE_URL in .env). `dciso ollama-models` lists them.
+#                            The AI CISO runs as a separate tool-less Hermes by
+#                            DEFAULT (host sidecar, rule engine as fast fallback).
+#                            --ciso rule  = instant containerised rule engine (CI / slow box)
+#                            --ciso llm   = one direct model call (CISO_LLM_* in .env)
+#   dciso ciso-hermes setup|test|status|remove [model]
+#                            manage the CISO-as-Hermes instance (~/.hermes-ciso)
+#   dciso down             stop the stack (keep the audit trail)
+#   dciso destroy          stop + delete audit data + built images
+#   dciso plug   [--isolated|--clone|--home DIR] [--exec-pep]
+#                  put the CISO in front of Hermes. --exec-pep also installs a
+#                  pre_tool_call hook so ACTUAL tool executions are governed
+#                  (Layer 2), not just what the model proposes.
+#                  (no flag = your real ~/.hermes; --clone = a governed copy of it;
+#                   --isolated = a tiny throwaway profile)
+#   dciso unplug [--isolated|--clone|--home DIR]   remove the CISO, restore Hermes
+#   dciso verify [--home DIR]                prove the gateway is not bypassable
+#   dciso status                             stack + routing status
+#   dciso dashboard                          print the dashboard URL
+#   dciso logs [service]                     follow logs
+#   dciso test                               run policy + unit tests
+#   dciso doctor                             diagnose common problems
+#   dciso unmapped                           list tool calls denied as UNKNOWN_TOOL
+#                                            (candidates for HERMES_MAPPING_PATH)
+#   dciso guided [--auto]                    narrated walk-through of every outcome
+#   dciso reset [--audit]                    clear the auto-replan counters (and,
+#                                            with --audit, the whole audit trail)
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+COMPOSE="docker compose"
+ENV_FILE="$REPO/.env"
+
+c_red=$'\e[31m'; c_grn=$'\e[32m'; c_yel=$'\e[33m'; c_dim=$'\e[2m'; c_off=$'\e[0m'
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_yel" "$c_off" "$*"; }
+die()  { printf '%s✗ %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 || die "Docker not found. Install Docker + Compose v2 first."
+  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 not found (need 'docker compose')."
+}
+
+load_env() { [ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a || true; }
+gw_key()   { sed -n 's/^GATEWAY_MASTER_KEY=//p' "$ENV_FILE" 2>/dev/null; }
+
+rand() { # url-safe random string, arg = bytes
+  if command -v openssl >/dev/null 2>&1; then openssl rand -base64 "${1:-24}" | tr '+/' '-_' | tr -d '=\n'
+  else head -c "${1:-24}" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; fi
+}
+
+# --------------------------------------------------------------------------- #
+cmd_setup() {
+  need_docker
+  if [ ! -f "$ENV_FILE" ]; then
+    cp "$REPO/.env.example" "$ENV_FILE"
+    ok "created .env from .env.example"
+  else
+    ok ".env already exists (leaving it alone)"
+  fi
+  # fill placeholders that must never stay as-is
+  _set() { # key value
+    if grep -qE "^$1=" "$ENV_FILE"; then
+      sed -i.bak "s|^$1=.*|$1=$2|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+    else
+      printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
+    fi
+  }
+  # generate any secret that is still blank or a placeholder
+  grep -qE '^GATEWAY_MASTER_KEY=[[:space:]]*$|^GATEWAY_MASTER_KEY=.*(CHANGE_ME|REPLACE_ME)' "$ENV_FILE" \
+    && _set GATEWAY_MASTER_KEY "gw-$(rand 24)" && ok "generated GATEWAY_MASTER_KEY"
+  grep -qE '^GOVERNANCE_APPROVAL_SECRET=[[:space:]]*$' "$ENV_FILE" \
+    && _set GOVERNANCE_APPROVAL_SECRET "$(rand 32)" && ok "generated GOVERNANCE_APPROVAL_SECRET"
+  say ""
+  say "Next:"
+  say "  ${c_dim}dciso up${c_off}       offline demo (no API key needed)"
+  say "  ${c_dim}dciso demo${c_off}     real model — first put a real OPENAI_API_KEY in .env"
+  say "  ${c_dim}dciso plug${c_off}     then point your Hermes at the gateway"
+}
+
+cmd_up() {
+  need_docker
+  GATEWAY_ROUTE_MODE=test $COMPOSE up -d --build
+  _wait_healthy
+  say ""
+  ok  "governance stack is up (offline test mode)"
+  say "  gateway   : http://127.0.0.1:4000   (token: $(gw_key))"
+  say "  dashboard : http://127.0.0.1:8900"
+  say "  next      : ${c_dim}dciso plug${c_off}"
+}
+
+cmd_demo() {
+  need_docker
+  load_env
+  case "${OPENAI_API_KEY:-}" in ""|sk-REPLACE_ME) die "Put a real OPENAI_API_KEY in .env first (dciso setup created it).";; esac
+  GATEWAY_ROUTE_MODE=demo CISO_MODE=llm $COMPOSE up -d --build
+  _wait_healthy
+  say ""
+  ok  "governance stack is up in DEMO mode — gateway routes to real OpenAI, CISO uses an LLM"
+  say "  dashboard : http://127.0.0.1:8900"
+  say "  next      : ${c_dim}dciso plug${c_off}"
+}
+
+cmd_down()    { need_docker; _host_ciso_stop; $COMPOSE down; ok "stack stopped (audit trail kept — 'dciso destroy' wipes it)"; }
+cmd_destroy() { need_docker; _host_ciso_stop; $COMPOSE down -v --rmi local; ok "stack, audit volume and local images removed"; }
+cmd_logs()    { need_docker; $COMPOSE logs -f --tail=120 ${1:-}; }
+cmd_dashboard(){ say "http://127.0.0.1:8900"; command -v xdg-open >/dev/null && xdg-open http://127.0.0.1:8900 >/dev/null 2>&1 || true; }
+
+_wait_healthy() {
+  printf 'waiting for services'
+  for _ in $(seq 1 60); do
+    if curl -sf http://127.0.0.1:4000/health/readiness >/dev/null 2>&1 \
+       && curl -sf http://127.0.0.1:8900/health/liveness >/dev/null 2>&1; then
+      printf ' ready\n'; return 0
+    fi
+    printf '.'; sleep 2
+  done
+  printf '\n'; warn "services did not all report healthy in time — check 'dciso logs'"
+}
+
+# ---- CISO-as-Hermes: host-side advisor sidecar -------------------------- #
+CISO_HERMES_HOME_DIR="${CISO_HERMES_HOME:-$HOME/.hermes-ciso}"
+HOST_CISO_PORT="${HOST_CISO_PORT:-9009}"
+HOST_CISO_PID="$REPO/.run/ciso-advisor-host.pid"
+HOST_CISO_LOG="$REPO/.run/ciso-advisor-host.log"
+CISO_HERMES_OVERRIDE="$REPO/docker-compose.ciso-hermes.yml"
+
+_py() { [ -x "$REPO/.venv/bin/python" ] && echo "$REPO/.venv/bin/python" || echo python3; }
+
+_host_ciso_running() { [ -f "$HOST_CISO_PID" ] && kill -0 "$(cat "$HOST_CISO_PID")" 2>/dev/null; }
+
+_host_ciso_start() {   # $1 = ollama base url, $2 = ciso model
+  local base="$1" model="$2"
+  _host_ciso_running && { say "host CISO advisor already running (pid $(cat "$HOST_CISO_PID"))"; return 0; }
+  command -v hermes >/dev/null 2>&1 || die "hermes not on PATH — the CISO-as-Hermes mode needs it on the host"
+  [ -d "$CISO_HERMES_HOME_DIR" ] || die "no CISO Hermes home at $CISO_HERMES_HOME_DIR — run 'dciso ciso-hermes setup' first"
+  "$(_py)" -c 'import fastapi, uvicorn, httpx' 2>/dev/null || die "host python lacks fastapi/uvicorn/httpx — 'pip install -r ciso-advisor/requirements.txt' into .venv"
+  mkdir -p "$REPO/.run"
+  say "starting host CISO advisor (Hermes mode) on 127.0.0.1:$HOST_CISO_PORT ..."
+  # ( exec env ... python ) & — the subshell exec's into python so $! IS python's pid
+  ( cd "$REPO/ciso-advisor" && exec env \
+      CISO_MODE=hermes \
+      CISO_HERMES_HOME="$CISO_HERMES_HOME_DIR" \
+      CISO_HERMES_MODEL="$model" \
+      CISO_HERMES_BIN="$(command -v hermes)" \
+      CISO_HERMES_FALLBACK="${CISO_HERMES_FALLBACK:-rule}" \
+      CISO_HERMES_TIMEOUT="${CISO_HERMES_TIMEOUT:-60}" \
+      CISO_HERMES_SKILLS="${CISO_HERMES_SKILLS:-}" \
+      OLLAMA_BASE_URL="$base" \
+      "$(_py)" -m uvicorn app:app --host "${HOST_CISO_BIND:-0.0.0.0}" --port "$HOST_CISO_PORT" \
+      >"$HOST_CISO_LOG" 2>&1 ) &
+  echo $! > "$HOST_CISO_PID"
+  disown 2>/dev/null || true
+  # bind 0.0.0.0 so the gateway/pep containers can reach it via
+  # host.docker.internal (same reason `hermes proxy` binds 0.0.0.0). It is a
+  # localhost-facing dev sidecar with no secrets; set HOST_CISO_BIND=127.0.0.1
+  # to keep it host-only (then containers can't call it).
+  for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:$HOST_CISO_PORT/health/policy" >/dev/null 2>&1 && { ok "host CISO advisor ready (pid $(cat "$HOST_CISO_PID"))"; return 0; }
+    sleep 0.5
+  done
+  warn "host CISO advisor did not answer on :$HOST_CISO_PORT — see $HOST_CISO_LOG"
+}
+
+_host_ciso_stop() {
+  _host_ciso_running || { rm -f "$HOST_CISO_PID"; return 0; }
+  kill "$(cat "$HOST_CISO_PID")" 2>/dev/null || true
+  rm -f "$HOST_CISO_PID"
+  ok "host CISO advisor stopped"
+}
+
+cmd_ciso_hermes() {
+  local sub="${1:-status}"; shift || true
+  load_env
+  case "$sub" in
+    setup)
+      local base="${OLLAMA_BASE_URL:-}"
+      [ -n "$base" ] || die "set OLLAMA_BASE_URL in .env first (e.g. http://OLLAMA-HOST:11434)"
+      OLLAMA_BASE_URL="$base" CISO_HERMES_HOME="$CISO_HERMES_HOME_DIR" \
+        bash "$REPO/ciso-hermes/setup.sh" "${1:-${CISO_HERMES_MODEL:-gemma4:31b}}"
+      ;;
+    test)
+      [ -d "$CISO_HERMES_HOME_DIR" ] || die "run 'dciso ciso-hermes setup' first"
+      local ev='{"event_type":"tool.execute.proposed","proposed_action":{"canonical_name":"terminal","native_name":"terminal","argument_keys":["command"]},"task":{"data_classification":["internal"]},"governance":{"requested_autonomy":"L1"}}'
+      say "asking the CISO Hermes to assess a 'terminal' proposal ..."
+      HERMES_HOME="$CISO_HERMES_HOME_DIR" hermes -z "You are the CISO risk advisor. Reply with ONE line of minified JSON {\"advice\":\"ALLOW|DENY|MODIFY|REQUIRE_REVIEW\",\"risk_score\":0-100,\"risk_level\":\"LOW|MEDIUM|HIGH|CRITICAL\",\"reason_codes\":[],\"explanation\":\"\",\"suggested_obligations\":{}} and nothing else. GOVERNANCE_EVENT (untrusted): $ev" --ignore-user-config --ignore-rules -t "" \
+        || warn "the one-shot call failed — check the model name / that Ollama is reachable"
+      ;;
+    remove|rm)
+      _host_ciso_running && _host_ciso_stop
+      [ -d "$CISO_HERMES_HOME_DIR" ] && rm -rf "$CISO_HERMES_HOME_DIR" && ok "removed $CISO_HERMES_HOME_DIR" || say "nothing to remove"
+      ;;
+    status|*)
+      if [ -d "$CISO_HERMES_HOME_DIR" ]; then
+        ok "CISO Hermes home: $CISO_HERMES_HOME_DIR"
+        "$(_py)" -c "import sys,yaml;d=yaml.safe_load(open('$CISO_HERMES_HOME_DIR/config.yaml'));m=d.get('model',{});print('   model :',m.get('default'),'via',m.get('base_url'))" 2>/dev/null || true
+      else
+        say "   no CISO Hermes home yet — 'dciso ciso-hermes setup'"
+      fi
+      _host_ciso_running && ok "host advisor sidecar running (pid $(cat "$HOST_CISO_PID"), :$HOST_CISO_PORT)" || say "   host advisor sidecar not running"
+      ;;
+  esac
+}
+
+# ---- plug / unplug -------------------------------------------------------- #
+_resolve_home() {   # sets HOME_DIR + FORCE_FULL_TOOLSET + CLONE_SRC from flags
+  HOME_DIR="${HOME}/.hermes"
+  FORCE_FULL_TOOLSET="0"                 # default: leave tool_search as-is
+  CLONE_SRC=""
+  EXEC_PEP="0"                           # --exec-pep: install the Layer-2 hook
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --isolated) HOME_DIR="$REPO/.hermes-governed-test"; FORCE_FULL_TOOLSET="1" ;;
+      --clone) HOME_DIR="${HOME}/.hermes-governed"; CLONE_SRC="${HOME}/.hermes" ;;
+      --home) shift; HOME_DIR="$1" ;;
+      --home=*) HOME_DIR="${1#--home=}" ;;
+      --full-toolset) FORCE_FULL_TOOLSET="1" ;;
+      --keep-toolsearch) FORCE_FULL_TOOLSET="0" ;;
+      --exec-pep) EXEC_PEP="1" ;;
+    esac
+    shift
+  done
+}
+
+cmd_plug() {
+  _resolve_home "$@"
+  load_env
+  [ -n "$(gw_key)" ] || die "run 'dciso setup' first (no GATEWAY_MASTER_KEY in .env)"
+  curl -sf http://127.0.0.1:4000/health/readiness >/dev/null 2>&1 || warn "gateway not reachable yet — run 'dciso up' / 'dciso up-proxy' / 'dciso demo'"
+
+  if [ -n "$CLONE_SRC" ]; then
+    if [ ! -d "$HOME_DIR" ]; then
+      [ -d "$CLONE_SRC" ] || die "no profile at $CLONE_SRC to clone"
+      say "cloning your Hermes CONFIG only (skills/tools/auth — not the install, sessions or caches) -> ${c_dim}$HOME_DIR${c_off} ..."
+      mkdir -p "$HOME_DIR"
+      # allowlist: only the config-bearing entries. The Hermes install itself
+      # (hermes-agent/, node/, bin/, venv) and runtime state are NOT copied.
+      for f in config.yaml .env auth.json auth.lock SOUL.md \
+               .skills_prompt_snapshot.json context_length_cache.yaml \
+               provider_models_cache.json models_dev_cache.json .update_check; do
+        [ -e "$CLONE_SRC/$f" ] && cp -a "$CLONE_SRC/$f" "$HOME_DIR/" 2>/dev/null || true
+      done
+      for d in skills hooks memories; do
+        [ -d "$CLONE_SRC/$d" ] && cp -a "$CLONE_SRC/$d" "$HOME_DIR/" 2>/dev/null || true
+      done
+      ok "cloned ($(du -sh "$HOME_DIR" 2>/dev/null | cut -f1)). Your real ~/.hermes is never touched."
+    else
+      say "reusing existing clone at ${c_dim}$HOME_DIR${c_off}"
+    fi
+  fi
+
+  say "plugging the CISO in front of Hermes profile: ${c_dim}$HOME_DIR${c_off}"
+  if [ "$HOME_DIR" = "${HOME}/.hermes" ]; then
+    warn "this is your REAL Hermes profile. It is backed up; 'dciso unplug' restores it."
+    warn "prefer 'dciso plug --clone' to govern a copy and leave your daily driver alone."
+  fi
+  if [ "$HOME_DIR" = "${HOME}/.hermes" ] || [ -n "$CLONE_SRC" ]; then
+    warn "while plugged, Hermes uses the GATEWAY's upstream model, not its own (see 'dciso up-proxy' / 'dciso demo')."
+  fi
+  if [ "$EXEC_PEP" = "1" ]; then
+    curl -sf http://127.0.0.1:8710/health/liveness >/dev/null 2>&1 || warn "execution PEP (:8710) not reachable — 'dciso up' rebuilds it"
+  fi
+  HERMES_HOME="$HOME_DIR" GATEWAY_MASTER_KEY="$(gw_key)" GATEWAY_URL="http://127.0.0.1:4000/v1" \
+    DCISO_FORCE_FULL_TOOLSET="$FORCE_FULL_TOOLSET" DCISO_INSTALL_EXEC_HOOK="$EXEC_PEP" \
+    bash "$REPO/hermes/enable-routing.sh"
+  ok "plugged in. Model calls are governed$([ "$EXEC_PEP" = 1 ] && echo ' + tool executions (Layer 2)')."
+  [ "$EXEC_PEP" = 1 ] && warn "first run of each tool prompts once to allow the hook (Hermes consent)."
+  say "  try : ${c_dim}HERMES_HOME=$HOME_DIR hermes chat -q 'say GOVERNED_OK'${c_off}"
+  say "  see : http://127.0.0.1:8900"
+  say "  undo: ${c_dim}dciso unplug${c_off}"
+}
+
+cmd_unplug() {
+  _resolve_home "$@"
+  say "removing the CISO from Hermes profile: ${c_dim}$HOME_DIR${c_off}"
+  HERMES_HOME="$HOME_DIR" bash "$REPO/hermes/disable-routing.sh"
+  ok "unplugged. Hermes profile is back to its previous (un-governed) state."
+}
+
+cmd_verify() {
+  _resolve_home "$@"
+  load_env
+  HERMES_HOME="$HOME_DIR" GATEWAY_MASTER_KEY="$(gw_key)" GATEWAY_URL="http://127.0.0.1:4000" \
+    bash "$REPO/hermes/verify-routing.sh"
+}
+
+cmd_status() {
+  need_docker
+  $COMPOSE ps --format 'table {{.Service}}\t{{.Status}}' 2>/dev/null || warn "stack not running"
+  say ""
+  local mode ciso_url
+  mode="$($COMPOSE exec -T gateway printenv GATEWAY_ROUTE_MODE 2>/dev/null || echo '?')"
+  ciso_url="$($COMPOSE exec -T gateway printenv CISO_ADVISOR_URL 2>/dev/null || echo '?')"
+  say "  gateway route mode : $mode"
+  case "$ciso_url" in
+    *host.docker.internal*)
+      if _host_ciso_running; then
+        ok  "CISO advisor      : hermes (host sidecar pid $(cat "$HOST_CISO_PID"), :$HOST_CISO_PORT)"
+        curl -sf "http://127.0.0.1:$HOST_CISO_PORT/health/policy" 2>/dev/null | "$(_py)" -c "import sys,json;d=json.load(sys.stdin);print('                       home present:',d.get('hermes_home_present'),'| home:',d.get('hermes_home'))" 2>/dev/null || true
+      else
+        warn "CISO advisor      : hermes mode, but host sidecar NOT running — 'dciso up-ollama --ciso hermes'"
+      fi ;;
+    ?|"") : ;;
+    *) say "  CISO advisor       : containerised ($ciso_url)" ;;
+  esac
+  if [ "$mode" = "proxy" ]; then
+    curl -sf "http://127.0.0.1:$PROXY_PORT/v1/models" -H 'Authorization: Bearer x' >/dev/null 2>&1 \
+      && ok "hermes proxy reachable on :$PROXY_PORT" || warn "hermes proxy NOT reachable — 'dciso proxy start'"
+  fi
+  say ""
+  for h in "$HOME/.hermes" "$HOME/.hermes-governed" "$REPO/.hermes-governed-test"; do
+    if [ -f "$h/.env" ] && grep -q '^OPENAI_BASE_URL=http://127.0.0.1:4000' "$h/.env" 2>/dev/null; then
+      ok "PLUGGED: $h  -> gateway"
+    elif [ -f "$h/.env" ]; then
+      say "   not plugged: $h"
+    fi
+  done
+}
+
+cmd_test() {
+  local py opa
+  py="$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)"
+  opa="$([ -x .tools/opa ] && echo ./.tools/opa || echo opa)"
+  command -v "$opa" >/dev/null 2>&1 || [ -x "$opa" ] || { warn "opa not found — 'make bootstrap' to fetch it"; opa=""; }
+  [ -n "$opa" ] && { "$opa" test policy/ || die "rego tests failed"; }
+  "$py" -m pytest -q || die "python tests failed"
+}
+
+cmd_doctor() {
+  command -v docker >/dev/null 2>&1 && ok "docker present" || warn "docker missing"
+  docker compose version >/dev/null 2>&1 && ok "compose v2 present" || warn "compose v2 missing"
+  [ -f "$ENV_FILE" ] && ok ".env present" || warn ".env missing (run 'dciso setup')"
+  [ -f "$ENV_FILE" ] && ! grep -qE 'CHANGE_ME|REPLACE_ME' "$ENV_FILE" && ok ".env has no placeholders" || warn ".env still has placeholders"
+  curl -sf http://127.0.0.1:4000/health/readiness >/dev/null 2>&1 && ok "gateway reachable" || warn "gateway not reachable (run 'dciso up')"
+  curl -sf http://127.0.0.1:8900/health/liveness >/dev/null 2>&1 && ok "dashboard reachable" || warn "dashboard not reachable"
+  command -v hermes >/dev/null 2>&1 && ok "hermes CLI on PATH ($(hermes --version 2>/dev/null | head -1))" || warn "hermes CLI not on PATH (see hermes/install-hermes-*.sh)"
+}
+
+cmd_unmapped() {
+  local dash="http://127.0.0.1:8900"
+  curl -sf "$dash/api/events" >/dev/null 2>&1 || die "dashboard not reachable — 'dciso up' first"
+  python3 - "$dash" <<'PY'
+import json, sys, urllib.request
+dash = sys.argv[1]
+seen = {}
+for e in json.load(urllib.request.urlopen(dash + "/api/events"))["events"]:
+    rc = e.get("reason_codes") or ""
+    if "UNKNOWN_TOOL" in rc:
+        try:
+            full = json.load(urllib.request.urlopen(dash + "/api/event/" + e["row_id"]))
+            n = (full.get("event_json") or {}).get("proposed_action", {}).get("native_name")
+        except Exception:
+            n = e.get("native_name")
+        if n and n != "-":
+            seen[n] = seen.get(n, 0) + 1
+if not seen:
+    print("No UNKNOWN_TOOL denials in recent audit — nothing to map.")
+else:
+    print("Tool names your Hermes emitted that the gateway does not recognise:\n")
+    for n, c in sorted(seen.items(), key=lambda x: -x[1]):
+        print(f"  {n}   (x{c})")
+    spawn = next(iter(seen))
+    print("\nIf one of these is Hermes' sub-agent/delegation tool, map it:")
+    print(f'  echo \'{{"{spawn}": "agent.spawn"}}\' > hermes/hermes_mapping.json')
+    print("  # add to docker-compose.yml gateway env:  HERMES_MAPPING_PATH: /app/gateway/hermes_mapping.json")
+    print("  # add to gateway/Dockerfile:               COPY gateway/hermes_mapping.json /app/gateway/")
+    print("  # then:  dciso up   (rebuilds the gateway)")
+PY
+}
+
+PROXY_PORT=8645
+PROXY_PID="$REPO/.hermes-proxy.pid"
+
+cmd_login() {
+  command -v hermes >/dev/null 2>&1 || die "hermes CLI not on PATH (install Hermes first)"
+  case "${1:-nous}" in
+    nous|"") say "opening Nous Portal OAuth in your browser..."; hermes portal ;;
+    xai)     say "logging in to xAI..."; hermes auth add xai --type oauth || hermes auth add xai ;;
+    *) die "unknown provider '$1' (nous | xai)" ;;
+  esac
+}
+
+cmd_proxy() {
+  command -v hermes >/dev/null 2>&1 || die "hermes CLI not on PATH"
+  case "${1:-status}" in
+    status)
+      hermes proxy status || true ;;
+    start)
+      if curl -sf "http://127.0.0.1:$PROXY_PORT/v1/models" -H 'Authorization: Bearer x' >/dev/null 2>&1; then
+        ok "proxy already running on :$PROXY_PORT"; return
+      fi
+      local prov="${2:-nous}"
+      say "starting 'hermes proxy' (provider=$prov) on 0.0.0.0:$PROXY_PORT in the background..."
+      nohup hermes proxy start --provider "$prov" --host 0.0.0.0 --port "$PROXY_PORT" \
+        > "$REPO/.hermes-proxy.log" 2>&1 &
+      echo $! > "$PROXY_PID"
+      sleep 2
+      for _ in $(seq 1 15); do
+        curl -sf "http://127.0.0.1:$PROXY_PORT/v1/models" -H 'Authorization: Bearer x' >/dev/null 2>&1 && break
+        sleep 1
+      done
+      if curl -sf "http://127.0.0.1:$PROXY_PORT/v1/models" -H 'Authorization: Bearer x' >/dev/null 2>&1; then
+        ok "proxy up on :$PROXY_PORT (log: .hermes-proxy.log)"
+      else
+        warn "proxy did not answer — check .hermes-proxy.log; run 'dciso login' if not authed"
+      fi ;;
+    stop)
+      if [ -f "$PROXY_PID" ] && kill "$(cat "$PROXY_PID")" 2>/dev/null; then
+        rm -f "$PROXY_PID"; ok "proxy stopped"
+      else
+        # match the exact argv, not a loose substring, so we never hit our own shell
+        local pids
+        pids="$(pgrep -f 'hermes proxy start --provider' || true)"
+        [ -n "$pids" ] && kill $pids 2>/dev/null && ok "proxy stopped" || warn "no proxy process found"
+      fi ;;
+    *) die "usage: dciso proxy start|stop|status [nous|xai]" ;;
+  esac
+}
+
+cmd_up_proxy() {
+  need_docker
+  load_env
+  local prov="nous" ciso_llm=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      nous|xai) prov="$1" ;;
+      --ciso-llm) ciso_llm=1 ;;
+    esac
+    shift
+  done
+  local purl="${HERMES_PROXY_URL:-http://host.docker.internal:8645/v1}"
+  # LiteLLM needs a leading openai/ for a custom OpenAI-compatible base; the
+  # proxy's own model ids already carry a provider prefix -> double prefix.
+  local umodel="${UPSTREAM_MODEL:-openai/upstage/solar-pro4:free}"
+  local cmode="rule" cmodel=""
+  if [ "$ciso_llm" = 1 ]; then
+    cmode="llm"; cmodel="${CISO_LLM_MODEL_PROXY:-openai/stepfun/step-3.7-flash:free}"
+  fi
+  cmd_proxy start "$prov"
+  say "starting the governance stack routed through 'hermes proxy' ($prov) ..."
+  GATEWAY_ROUTE_MODE=proxy CISO_MODE="$cmode" \
+    HERMES_PROXY_URL="$purl" UPSTREAM_MODEL="$umodel" \
+    CISO_LLM_BASE_URL="$purl" CISO_LLM_MODEL="$cmodel" \
+    $COMPOSE up -d --build
+  _wait_healthy
+  say ""
+  ok "stack up — the Business model is your logged-in ${prov} model."
+  say "  upstream model : $umodel"
+  say "  CISO advisor   : $cmode${cmodel:+ ($cmodel)}"
+  say "  free models    : hermes proxy exposes some :free ids — see 'dciso proxy models'"
+  say "  next           : ${c_dim}dciso plug${c_off}"
+}
+
+cmd_up_ollama() {
+  need_docker
+  load_env
+  # CISO-as-Hermes is THE CISO for the real-model path. Not read from .env's
+  # CISO_MODE — pass --ciso rule|llm to opt out (rule = instant, containerised;
+  # needed for CI / slow boxes / no-Ollama).
+  local base="${OLLAMA_BASE_URL:-}" ciso_kind="hermes" ciso_model="${CISO_HERMES_MODEL:-gemma4:31b}"
+  local agent="${GATEWAY_DEFAULT_HARNESS-hermes}"   # which agent is being plugged
+  local -a pos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ciso) shift; ciso_kind="$1" ;;
+      --ciso=*) ciso_kind="${1#--ciso=}" ;;
+      --ciso-model) shift; ciso_model="$1" ;;
+      --ciso-model=*) ciso_model="${1#--ciso-model=}" ;;
+      --agent) shift; agent="$1" ;;
+      --agent=*) agent="${1#--agent=}" ;;
+      *) pos+=("$1") ;;
+    esac
+    shift
+  done
+  # --agent generic|auto  -> no default harness: the generic OpenAI-compatible
+  # adapter governs whatever points at the gateway, and a per-request
+  # metadata.harness_type (hermes / cursor / langchain / …) is respected.
+  case "$agent" in generic|auto|any|"") agent="" ;; esac
+  [ -n "$base" ] || die "set OLLAMA_BASE_URL in .env (e.g. http://OLLAMA-HOST:11434) or: OLLAMA_BASE_URL=... dciso up-ollama"
+  local model="${pos[0]:-${OLLAMA_MODEL:-gpt-oss:120b}}"
+  say "checking Ollama at $base ..."
+  curl -sf --max-time 6 "${base%/}/api/tags" >/dev/null 2>&1 || warn "can't reach $base/api/tags — check the IP / that ollama serve is running"
+
+  local -a files=(-f "$REPO/docker-compose.yml")
+  if [ "$ciso_kind" = "hermes" ]; then
+    [ -d "$CISO_HERMES_HOME_DIR" ] || { say "no CISO Hermes yet — scaffolding one ..."; OLLAMA_BASE_URL="$base" CISO_HERMES_HOME="$CISO_HERMES_HOME_DIR" bash "$REPO/ciso-hermes/setup.sh" "$ciso_model"; }
+    _host_ciso_start "$base" "$ciso_model"
+    files+=(-f "$CISO_HERMES_OVERRIDE")
+    # the containerised advisor is replaced by the host sidecar — stop it so
+    # there's exactly one CISO and 'docker compose ps' isn't misleading
+    $COMPOSE stop ciso-advisor >/dev/null 2>&1 || true
+  fi
+
+  say "starting the stack routed to Ollama ($model) ..."
+  # in hermes mode the advisor waits on a `hermes -z` subprocess (tens of
+  # seconds on a 30B+ model) — give the gateway/pep -> advisor HTTP call room,
+  # otherwise it trips its own fail-closed path before the CISO can answer.
+  # NB: load_env already exported CISO_TIMEOUT_SECONDS from .env (default 4), so
+  # a plain ${VAR:-75} would never win — force it in hermes mode.
+  local ciso_http_to="${CISO_TIMEOUT_SECONDS:-4}"
+  if [ "$ciso_kind" = "hermes" ]; then
+    ciso_http_to="${CISO_HERMES_HTTP_TIMEOUT:-90}"
+  fi
+  GATEWAY_ROUTE_MODE=ollama CISO_MODE="$([ "$ciso_kind" = hermes ] && echo rule || echo "$ciso_kind")" \
+    CISO_TIMEOUT_SECONDS="$ciso_http_to" \
+    GATEWAY_DEFAULT_HARNESS="$agent" \
+    OLLAMA_BASE_URL="$base" OLLAMA_MODEL="$model" \
+    $COMPOSE "${files[@]}" up -d --build
+  _wait_healthy
+  say ""
+  ok "stack up — Business model is Ollama '$model' on $base."
+  if [ -z "$agent" ]; then
+    say "  agent scope  : ${c_grn}any OpenAI-compatible client${c_off} (generic adapter; per-request harness_type respected)"
+  else
+    say "  agent scope  : $agent (set --agent generic to govern any client)"
+  fi
+  if [ "$ciso_kind" = "hermes" ]; then
+    say "  CISO advisor : ${c_grn}hermes${c_off} (default) — a tool-less Hermes at $CISO_HERMES_HOME_DIR (model $ciso_model), host sidecar :$HOST_CISO_PORT"
+    say "                 rule engine is the fast fallback if it is slow/unreachable"
+    say "                 add ${c_dim}--ciso rule${c_off} for an instant, fully-containerised CISO"
+  else
+    say "  CISO advisor : $ciso_kind (containerised) — CISO-as-Hermes is the default; you passed --ciso $ciso_kind"
+  fi
+  say "  next         : ${c_dim}dciso plug --clone${c_off}"
+}
+
+cmd_ollama_models() {
+  load_env
+  local base="${OLLAMA_BASE_URL:-${1:-}}"
+  [ -n "$base" ] || die "OLLAMA_BASE_URL not set"
+  curl -sf --max-time 8 "${base%/}/api/tags" 2>/dev/null | \
+    $([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3) -c \
+    "import sys,json;[print(f\"  {m['name']:52s} {m.get('capabilities',[])}\") for m in json.load(sys.stdin)['models']]" \
+    || warn "can't reach $base"
+}
+
+cmd_proxy_models() {
+  curl -sf "http://127.0.0.1:$PROXY_PORT/v1/models" -H 'Authorization: Bearer x' 2>/dev/null \
+    | $([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3) -c \
+    "import sys,json;d=json.load(sys.stdin);[print(' ',m['id']) for m in d['data'] if m['id'].endswith(':free')]" \
+    || warn "proxy not running — 'dciso proxy start'"
+}
+
+cmd_reset() {
+  need_docker
+  local wipe_audit=0
+  [ "${1:-}" = "--audit" ] && wipe_audit=1
+  $COMPOSE exec -T gateway python -c "
+import sqlite3, os, sys
+p = os.environ.get('AUDIT_DB_PATH', '/data/audit.sqlite')
+c = sqlite3.connect(p)
+c.execute('DELETE FROM replan_state')
+try: c.execute('DELETE FROM approval_nonce')
+except Exception: pass
+if $wipe_audit: c.execute('DELETE FROM audit_log')
+c.commit(); print('replan counters cleared' + (' + audit trail wiped' if $wipe_audit else ''))
+" 2>/dev/null || warn "gateway not running — nothing to reset"
+  ok "reset done"
+}
+
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"; }
+
+case "${1:-}" in
+  setup)      shift; cmd_setup "$@" ;;
+  up)         shift; cmd_up "$@" ;;
+  demo)       shift; cmd_demo "$@" ;;
+  login)      shift; cmd_login "$@" ;;
+  proxy)      shift; [ "${1:-}" = "models" ] && { shift; cmd_proxy_models "$@"; } || cmd_proxy "$@" ;;
+  up-proxy)   shift; cmd_up_proxy "$@" ;;
+  up-ollama)  shift; cmd_up_ollama "$@" ;;
+  ollama-models) shift; cmd_ollama_models "$@" ;;
+  ciso-hermes) shift; cmd_ciso_hermes "$@" ;;
+  down)       shift; cmd_down "$@" ;;
+  destroy)    shift; cmd_destroy "$@" ;;
+  plug)       shift; cmd_plug "$@" ;;
+  unplug)     shift; cmd_unplug "$@" ;;
+  verify)     shift; cmd_verify "$@" ;;
+  status)     shift; cmd_status "$@" ;;
+  dashboard)  shift; cmd_dashboard "$@" ;;
+  logs)       shift; cmd_logs "$@" ;;
+  test)       shift; cmd_test "$@" ;;
+  doctor)     shift; cmd_doctor "$@" ;;
+  unmapped)   shift; cmd_unmapped "$@" ;;
+  guided)     shift; load_env; GATEWAY_MASTER_KEY="$(gw_key)" bash "$REPO/demo/guided.sh" "$@" ;;
+  reset)      shift; cmd_reset "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *) die "unknown command: $1  (run 'dciso help')" ;;
+esac

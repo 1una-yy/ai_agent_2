@@ -1,0 +1,169 @@
+# DCISO Governance Gateway — local PoC (ticket §10 Task 1).
+# All images pinned. No real secrets in this file — see .env (from .env.example).
+#
+# Route mode is controlled by GATEWAY_ROUTE_MODE in .env:
+#   test -> mock-llm (offline, deterministic)   | `make up`
+#   demo -> real OpenAI (needs OPENAI_API_KEY)  | `make demo-up`
+
+name: dciso-gw
+
+services:
+  opa:
+    image: openpolicyagent/opa:1.19.0@sha256:8523599954435a3659954ad51ee0304d22bd97576f16cdb02e5e39f38ff3962a
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=info"
+      - "--set=decision_logs.console=true"
+      - "--watch"          # hot-reload agent_governance.rego / data.json on edit
+      - "--ignore=tests"
+      - "/policy"
+    volumes:
+      - ./policy:/policy:ro
+    ports:
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      # readiness: the decision path must actually be loaded, not just "up"
+      test: ["CMD", "/opa", "eval", "--fail",
+             "r := http.send({\"method\":\"post\",\"url\":\"http://127.0.0.1:8181/v1/data/dciso/governance\",\"headers\":{\"Content-Type\":\"application/json\"},\"body\":{}}); r.status_code == 200; r.body.result != null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ciso-advisor:
+    build: ./ciso-advisor
+    image: dciso/ciso-advisor:0.1.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach a `hermes proxy` on the host
+    environment:
+      CISO_MODE: ${CISO_MODE:-rule}
+      CISO_LLM_MODEL: ${CISO_LLM_MODEL:-openai/gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-sk-unused}
+      # honours CISO_LLM_BASE_URL first (set to the hermes proxy in proxy mode)
+      OPENAI_BASE_URL: ${CISO_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    # No ports published: only the Gateway talks to it, on the internal network.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/health/policy').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mock-llm:
+    build: ./mock-llm
+    image: dciso/mock-llm:0.1.0
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health/liveness').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: dciso/gateway:0.1.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach a `hermes proxy` on the host
+    depends_on:
+      opa:
+        condition: service_healthy
+      ciso-advisor:
+        condition: service_healthy
+      mock-llm:
+        condition: service_started
+    environment:
+      GATEWAY_ROUTE_MODE: ${GATEWAY_ROUTE_MODE:-test}
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY:-hermes-to-gateway-token-CHANGE_ME}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      GATEWAY_UPSTREAM_MODEL: ${GATEWAY_UPSTREAM_MODEL:-}
+      HERMES_PROXY_URL: ${HERMES_PROXY_URL:-http://host.docker.internal:8645/v1}
+      UPSTREAM_MODEL: ${UPSTREAM_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      OPA_URL: http://opa:8181
+      OPA_DECISION_PATH: dciso/governance/decision
+      OPA_TIMEOUT_SECONDS: ${OPA_TIMEOUT_SECONDS:-3}
+      CISO_ADVISOR_URL: http://ciso-advisor:9000
+      CISO_TIMEOUT_SECONDS: ${CISO_TIMEOUT_SECONDS:-4}
+      AUDIT_DB_PATH: /data/audit.sqlite
+      REPLAN_MAX_ATTEMPTS: ${REPLAN_MAX_ATTEMPTS:-2}
+      GOVERNANCE_APPROVAL_SECRET: ${GOVERNANCE_APPROVAL_SECRET:-}
+      ALLOW_UNGOVERNED_STREAMING: ${ALLOW_UNGOVERNED_STREAMING:-0}
+      # unset -> "hermes"; explicitly empty -> generic adapter governs any
+      # OpenAI-compatible client and per-request metadata.harness_type wins.
+      GATEWAY_DEFAULT_HARNESS: ${GATEWAY_DEFAULT_HARNESS-hermes}
+      GOV_DEFAULT_AUTONOMY: ${GOV_DEFAULT_AUTONOMY:-L1}
+      GOV_DEFAULT_CAPABILITY: ${GOV_DEFAULT_CAPABILITY:-C1}
+      # output-side (Phase A) + egress-side (Phase B) governance
+      DCISO_OUTPUT_GATE: ${DCISO_OUTPUT_GATE:-1}
+      DCISO_OUTPUT_MAX_SCAN: ${DCISO_OUTPUT_MAX_SCAN:-200000}
+      DCISO_EGRESS_GATE: ${DCISO_EGRESS_GATE:-1}
+      DCISO_EGRESS_DEST_CLASS: ${DCISO_EGRESS_DEST_CLASS:-}
+    volumes:
+      - audit-data:/data
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness').status==200 else 1)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 45s
+
+  pep:
+    build:
+      context: .
+      dockerfile: pep/Dockerfile
+    image: dciso/pep:0.1.0
+    depends_on:
+      opa:
+        condition: service_healthy
+      ciso-advisor:
+        condition: service_healthy
+    environment:
+      OPA_URL: http://opa:8181
+      OPA_DECISION_PATH: dciso/governance/decision
+      OPA_TIMEOUT_SECONDS: ${OPA_TIMEOUT_SECONDS:-3}
+      CISO_ADVISOR_URL: http://ciso-advisor:9000
+      CISO_TIMEOUT_SECONDS: ${CISO_TIMEOUT_SECONDS:-4}
+      AUDIT_DB_PATH: /data/audit.sqlite
+      GOV_DEFAULT_AUTONOMY: ${GOV_DEFAULT_AUTONOMY:-L1}
+      GOV_DEFAULT_CAPABILITY: ${GOV_DEFAULT_CAPABILITY:-C1}
+    volumes:
+      - audit-data:/data
+    ports:
+      # localhost only — the Hermes pre_tool_call hook on the host calls this
+      - "127.0.0.1:8710:8710"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8710/health/liveness').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  viewer:
+    build: ./viewer
+    image: dciso/viewer:0.1.0
+    depends_on:
+      - gateway
+    environment:
+      AUDIT_DB_PATH: /data/audit.sqlite
+    volumes:
+      - audit-data:/data:ro
+    ports:
+      # localhost only — never expose the dashboard publicly
+      - "127.0.0.1:8900:8900"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8900/health/liveness').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+volumes:
+  audit-data:
