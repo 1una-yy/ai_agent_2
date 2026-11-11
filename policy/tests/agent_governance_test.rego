@@ -413,6 +413,13 @@ test_output_credential_hit_modifies_to_redact if {
 	"REDACT_OUTPUT_CREDENTIAL" in d.reason_codes
 }
 
+test_output_pii_hit_modifies_to_redact if {
+	evt := with_action(base_output_event, {"arguments": {"credential_hits": 0, "forbidden_hits": 0, "pii_hits": 1, "recipient_class": "user"}})
+	d := governance.decision with input as evt
+	d.decision == "MODIFY"
+	"REDACT_OUTPUT_PII" in d.reason_codes
+}
+
 test_output_forbidden_marker_denies if {
 	evt := with_action(base_output_event, {"arguments": {"credential_hits": 0, "forbidden_hits": 1, "recipient_class": "user"}})
 	d := governance.decision with input as evt

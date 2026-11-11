@@ -244,6 +244,7 @@ is_output_event if input.enforcement_phase == "model_output_pre_delivery"
 _out := object.get(input.proposed_action, "arguments", {})
 out_credential_hits := n if { is_output_event; n := object.get(_out, "credential_hits", 0) }
 out_forbidden_hits := n if { is_output_event; n := object.get(_out, "forbidden_hits", 0) }
+out_pii_hits := n if { is_output_event; n := object.get(_out, "pii_hits", 0) }
 out_recipient := lower(sprintf("%v", [object.get(_out, "recipient_class", "user")]))
 
 # a forbidden-disclosure marker in the answer -> block
@@ -264,6 +265,15 @@ deny_reasons contains "OUTPUT_RECIPIENT_NOT_CLEARED" if {
 modify_reasons contains "REDACT_OUTPUT_CREDENTIAL" if {
 	is_output_event
 	out_credential_hits > 0
+}
+
+# structural PII (ID number / phone / SSN / card shape) in the answer ->
+# redact it. Fires on the SHAPE of the data, independent of whether the
+# answer also happens to say "身分證"/"SSN" nearby (see out_forbidden_hits /
+# OUTPUT_RECIPIENT_NOT_CLEARED for the label/classification-based checks).
+modify_reasons contains "REDACT_OUTPUT_PII" if {
+	is_output_event
+	out_pii_hits > 0
 }
 
 # --------------------------------------------------------------------------- #

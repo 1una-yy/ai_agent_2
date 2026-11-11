@@ -79,6 +79,7 @@ services:
       GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY:-hermes-to-gateway-token-CHANGE_ME}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GATEWAY_UPSTREAM_MODEL: ${GATEWAY_UPSTREAM_MODEL:-}
       HERMES_PROXY_URL: ${HERMES_PROXY_URL:-http://host.docker.internal:8645/v1}
       UPSTREAM_MODEL: ${UPSTREAM_MODEL:-}

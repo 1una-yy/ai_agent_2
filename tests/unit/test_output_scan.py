@@ -44,7 +44,52 @@ def test_signal_dict_never_carries_raw_text():
     d = sig.as_signal_dict()
     assert "ghp_" not in str(d)
     assert set(d) == {"output_len", "output_sha256", "credential_hits", "credential_types",
-                      "forbidden_hits", "forbidden_markers", "truncated_scan"}
+                      "forbidden_hits", "forbidden_markers", "pii_hits", "pii_types",
+                      "truncated_scan"}
+
+
+# --------------------------------------------------------------------------- #
+# Structural PII patterns — matched by shape, not by a label word nearby.
+# --------------------------------------------------------------------------- #
+def test_detects_tw_national_id_without_the_label_word():
+    sig = output_scan.scan_text("his number starts with A199456780 as far as I can tell")
+    assert "tw_national_id" in sig.pii_hits
+    assert sig.any_hit is True
+
+
+def test_detects_tw_mobile_phone():
+    sig = output_scan.scan_text("call him at 0912-345-678 tomorrow")
+    assert "tw_mobile_phone" in sig.pii_hits
+
+
+def test_detects_ssn_and_credit_card_shapes():
+    sig = output_scan.scan_text("ssn 123-45-6789, card 4111 1111 1111 1111")
+    assert "ssn" in sig.pii_hits
+    assert "credit_card" in sig.pii_hits
+
+
+def test_clean_text_has_no_pii_hits():
+    sig = output_scan.scan_text("the weather today is nice and sunny")
+    assert sig.pii_hits == []
+
+
+def test_redact_removes_pii_shapes_too():
+    out = output_scan.redact("id A199456780, phone 0912-345-678, normal words here")
+    assert "A199456780" not in out
+    assert "0912-345-678" not in out
+    assert "normal words here" in out
+    assert out.count("已遮蔽") == 2
+
+
+def test_scan_payload_sensitive_field_hit_from_pii_shape_alone():
+    """The gap this closes: no "身分證"/"ssn" marker word anywhere in the
+    text, but a real ID-number-shaped string — egress must still flag it."""
+    sig = output_scan.scan_payload(
+        "contact record: A199456780, reachable at 0912-345-678",
+        sensitive_field_markers=["身分證", "ssn"])
+    assert "tw_national_id" in sig.sensitive_field_hits
+    assert "tw_mobile_phone" in sig.sensitive_field_hits
+    assert sig.any_hit is True
 
 
 # --------------------------------------------------------------------------- #

@@ -1,8 +1,9 @@
 #!/bin/sh
 # Resolve the upstream the Gateway routes `governed-model` to.
-#   GATEWAY_ROUTE_MODE=test  -> local mock-llm (offline, deterministic)
-#   GATEWAY_ROUTE_MODE=demo  -> real OpenAI (needs OPENAI_API_KEY)
-#   GATEWAY_ROUTE_MODE=proxy -> a real model via a `hermes proxy` login
+#   GATEWAY_ROUTE_MODE=test   -> local mock-llm (offline, deterministic)
+#   GATEWAY_ROUTE_MODE=demo   -> real OpenAI (needs OPENAI_API_KEY)
+#   GATEWAY_ROUTE_MODE=gemini -> real Google Gemini (needs GEMINI_API_KEY)
+#   GATEWAY_ROUTE_MODE=proxy  -> a real model via a `hermes proxy` login
 #                               (OAuth; no static API key). See docs/real-model-with-login.md
 set -eu
 
@@ -14,6 +15,17 @@ if [ "$MODE" = "demo" ]; then
   export GATEWAY_UPSTREAM_API_BASE="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
   export GATEWAY_UPSTREAM_API_KEY="$OPENAI_API_KEY"
   echo "[gateway] route mode=demo upstream=$GATEWAY_UPSTREAM_MODEL base=$GATEWAY_UPSTREAM_API_BASE"
+elif [ "$MODE" = "gemini" ]; then
+  # LiteLLM's native `gemini/` provider talks to Google's API directly (not an
+  # OpenAI-compatible /v1 endpoint) — it resolves its own endpoint from the
+  # model prefix, so NO api_base override is set here (an inherited empty
+  # GATEWAY_UPSTREAM_API_BASE would otherwise get passed straight through
+  # config.yaml's litellm_params and could misroute the request).
+  : "${GEMINI_API_KEY:?gemini mode requires GEMINI_API_KEY in the Gateway env}"
+  export GATEWAY_UPSTREAM_MODEL="${GATEWAY_UPSTREAM_MODEL:-gemini/gemini-3.8-flash}"
+  export GATEWAY_UPSTREAM_API_BASE=""
+  export GATEWAY_UPSTREAM_API_KEY="$GEMINI_API_KEY"
+  echo "[gateway] route mode=gemini upstream=$GATEWAY_UPSTREAM_MODEL"
 elif [ "$MODE" = "proxy" ]; then
   # `hermes proxy` runs on the host and attaches the real OAuth credential
   # upstream; it ignores the bearer we send.

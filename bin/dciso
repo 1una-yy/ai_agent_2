@@ -116,6 +116,22 @@ cmd_demo() {
   say "  next      : ${c_dim}dciso plug${c_off}"
 }
 
+cmd_gemini() {
+  need_docker
+  load_env
+  case "${GEMINI_API_KEY:-}" in ""|REPLACE_ME*) die "Put a real GEMINI_API_KEY in .env first.";; esac
+  # Force the model id regardless of what .env's shared GATEWAY_UPSTREAM_MODEL
+  # happens to hold (it may still carry an openai/... value from `dciso demo`).
+  GATEWAY_ROUTE_MODE=gemini CISO_MODE=rule \
+    GATEWAY_UPSTREAM_MODEL="${GEMINI_MODEL:-gemini/gemini-3.8-flash}" \
+    $COMPOSE up -d --build
+  _wait_healthy
+  say ""
+  ok  "governance stack is up — gateway routes to Google Gemini, CISO uses the instant rule engine"
+  say "  dashboard : http://127.0.0.1:8900"
+  say "  next      : ${c_dim}dciso plug${c_off}"
+}
+
 cmd_down()    { need_docker; _host_ciso_stop; $COMPOSE down; ok "stack stopped (audit trail kept — 'dciso destroy' wipes it)"; }
 cmd_destroy() { need_docker; _host_ciso_stop; $COMPOSE down -v --rmi local; ok "stack, audit volume and local images removed"; }
 cmd_logs()    { need_docker; $COMPOSE logs -f --tail=120 ${1:-}; }
@@ -579,6 +595,7 @@ case "${1:-}" in
   setup)      shift; cmd_setup "$@" ;;
   up)         shift; cmd_up "$@" ;;
   demo)       shift; cmd_demo "$@" ;;
+  gemini)     shift; cmd_gemini "$@" ;;
   login)      shift; cmd_login "$@" ;;
   proxy)      shift; [ "${1:-}" = "models" ] && { shift; cmd_proxy_models "$@"; } || cmd_proxy "$@" ;;
   up-proxy)   shift; cmd_up_proxy "$@" ;;

@@ -370,6 +370,91 @@ async def test_egress_forbidden_marker_withheld(cb, monkeypatch):
     assert _rows(os.environ["AUDIT_DB_PATH"])[0][0] == "DENY"
 
 
+# --------------------------------------------------------------------------- #
+# dest_class resolution — must reflect the REAL upstream host, never just the
+# GATEWAY_ROUTE_MODE label (a route labelled "ollama"/"local" pointed at a
+# genuinely public host must NOT be classified "local").
+# --------------------------------------------------------------------------- #
+def test_host_is_local_recognizes_private_and_loopback(cb):
+    is_local = cb.governance_handler_instance._host_is_local
+    assert is_local("127.0.0.1") is True
+    assert is_local("localhost") is True
+    assert is_local("192.168.1.10") is True
+    assert is_local("10.0.0.5") is True
+    assert is_local("172.16.0.9") is True
+    assert is_local("") is False
+
+
+def test_host_is_local_rejects_public_ip_and_hostnames(cb):
+    is_local = cb.governance_handler_instance._host_is_local
+    assert is_local("8.8.8.8") is False
+    assert is_local("api.openai.com") is False
+    assert is_local("ollama.example.com") is False
+
+
+def test_dest_class_ignores_route_mode_label_for_a_public_host(cb, monkeypatch):
+    # The bug being fixed: GATEWAY_ROUTE_MODE=ollama used to mean dest_class
+    # "local" unconditionally. Here the upstream is a genuinely public host —
+    # it must classify as external regardless of the route-mode label.
+    monkeypatch.setenv("GATEWAY_ROUTE_MODE", "ollama")
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "https://ollama.example.com/v1")
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "external"
+
+
+def test_dest_class_is_local_for_a_real_lan_ollama(cb, monkeypatch):
+    monkeypatch.setenv("GATEWAY_ROUTE_MODE", "ollama")
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "http://192.168.1.10:11434/v1")
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "local"
+
+
+def test_dest_class_approved_hosts_allowlist(cb, monkeypatch):
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "https://llm.partner.example.com/v1")
+    policy = dict(cb.GovernanceCallback._EGRESS_POLICY_DEFAULT, approved_hosts=["partner.example.com"])
+    assert cb.governance_handler_instance._dest_class({}, policy) == "approved"
+
+
+def test_dest_class_explicit_override_still_wins(cb, monkeypatch):
+    # The explicit test/demo override is a deliberate operator action (unlike
+    # the route-mode label) and must still take precedence.
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "https://ollama.example.com/v1")
+    monkeypatch.setenv("DCISO_EGRESS_DEST_CLASS", "external")
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "external"
+
+
+def test_dest_class_unresolvable_upstream_fails_safe_to_external(cb, monkeypatch):
+    monkeypatch.delenv("GATEWAY_UPSTREAM_API_BASE", raising=False)
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "external"
+
+
+@respx.mock
+async def test_egress_sensitive_field_caught_by_pii_shape_without_the_label_word(cb, monkeypatch):
+    """The gap this closes: content with no literal "身分證"/"ssn" marker word
+    nearby, but a real ID-number-shaped string, must still be caught."""
+    monkeypatch.setenv("DCISO_EGRESS_DEST_CLASS", "external")
+    respx.get(url__regex=r".*/v1/data/dciso/egress_policy.*").mock(
+        return_value=httpx.Response(200, json={"result": {
+            "enabled": True, "forbidden_markers": [], "sensitive_field_markers": ["身分證"],
+            "class_rules": {"external": {"max_result_kb": 256, "redact_credentials": True,
+                                        "block_forbidden": True, "block_if_sensitive_task": True,
+                                        "block_sensitive_fields": True}},
+            "withheld_notice": "[治理] withheld"}}))
+    respx.post("http://ciso-advisor:9000/advise").mock(
+        return_value=httpx.Response(200, json={"advice": "ALLOW", "risk_score": 1, "risk_level": "LOW"}))
+    respx.post(url__regex=r".*/v1/data/dciso/governance/decision.*").mock(
+        return_value=httpx.Response(200, json={"result": {
+            "decision": "DENY", "reason_codes": ["EGRESS_SENSITIVE_FIELD"],
+            "obligations": {}, "policy_version": "v0.1.0"}}))
+    # No "身分證" word anywhere — just the number in A1-prefixed TW-ID shape.
+    d = _data_with_tool_result("patient contact: his number starts with A199456780, call 0912-345-678")
+    out = await cb.governance_handler_instance.async_pre_call_hook(None, None, d, "completion")
+    assert "A199456780" not in out["messages"][2]["content"]
+    assert "未送往模型" in out["messages"][2]["content"] or "withheld" in out["messages"][2]["content"]
+
+
 @respx.mock
 async def test_phase_e_timings_written_to_audit(cb):
     respx.post("http://ciso-advisor:9000/advise").mock(

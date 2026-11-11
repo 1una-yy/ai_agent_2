@@ -28,6 +28,19 @@ _CREDENTIAL_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(?i)\b(?:api[_-]?key|secret|passwd|password|token|client[_-]?secret)\s*[=:]\s*['\"][^'\"\s]{12,}['\"]")),
 ]
 
+# Structural PII patterns — matched by SHAPE, not by a label word appearing
+# nearby. Closes the gap where `sensitive_field_markers` (plain keyword
+# matching, e.g. "身分證") misses the data entirely because the model
+# rephrased it without ever using that literal word (e.g. "his ID starts with
+# A1..." or a bare CSV dump). Kept conservative: real structural formats only,
+# not generic digit runs, to avoid flooding every reply with false positives.
+_PII_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("tw_national_id", re.compile(r"\b[A-Za-z][12]\d{8}\b")),
+    ("tw_mobile_phone", re.compile(r"\b09\d{2}[-\s]?\d{3}[-\s]?\d{3}\b")),
+    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    ("credit_card", re.compile(r"\b\d{4}[-\s]\d{4}[-\s]\d{4}[-\s]\d{4}\b|\b\d{16}\b")),
+]
+
 _REDACTION = "[已遮蔽:{kind}]"
 
 
@@ -37,11 +50,12 @@ class OutputSignals:
     output_sha256: str = ""
     credential_hits: list[str] = field(default_factory=list)   # types, deduped, ordered
     forbidden_hits: list[str] = field(default_factory=list)    # markers matched
+    pii_hits: list[str] = field(default_factory=list)          # structural PII pattern types
     truncated_scan: bool = False
 
     @property
     def any_hit(self) -> bool:
-        return bool(self.credential_hits or self.forbidden_hits)
+        return bool(self.credential_hits or self.forbidden_hits or self.pii_hits)
 
     def as_signal_dict(self) -> dict:
         """Goes into the GovernanceEvent — counts/types only, never raw text."""
@@ -52,6 +66,8 @@ class OutputSignals:
             "credential_types": list(self.credential_hits),
             "forbidden_hits": len(self.forbidden_hits),
             "forbidden_markers": list(self.forbidden_hits),
+            "pii_hits": len(self.pii_hits),
+            "pii_types": list(self.pii_hits),
             "truncated_scan": self.truncated_scan,
         }
 
@@ -76,15 +92,21 @@ def scan_text(text: str | None, forbidden_markers: list[str] | None = None,
         m = str(marker).strip()
         if m and m.lower() in low:
             sig.forbidden_hits.append(m)
+
+    for kind, pat in _PII_PATTERNS:
+        if pat.search(window) and kind not in sig.pii_hits:
+            sig.pii_hits.append(kind)
     return sig
 
 
 def redact(text: str | None, max_scan: int = 200_000) -> str:
-    """Replace credential-shaped spans with a marker. Leaves everything else
-    untouched. Used when OPA returns MODIFY(redact) for the output phase."""
+    """Replace credential- and PII-shaped spans with a marker. Leaves
+    everything else untouched. Used when OPA returns MODIFY(redact)."""
     text = text or ""
     head, tail = text[:max_scan], text[max_scan:]
     for kind, pat in _CREDENTIAL_PATTERNS:
+        head = pat.sub(_REDACTION.format(kind=kind), head)
+    for kind, pat in _PII_PATTERNS:
         head = pat.sub(_REDACTION.format(kind=kind), head)
     return head + tail
 
@@ -140,6 +162,13 @@ def scan_payload(text: str | None, *, forbidden_markers: list[str] | None = None
         m = str(marker).strip().lower()
         if m and m in low:
             sig.sensitive_field_hits.append(str(marker).strip())
+
+    # Structural PII hits count as sensitive fields too — a real ID-number-
+    # shaped string triggers this even when the model never says the word
+    # "身分證"/"SSN" next to it (see _PII_PATTERNS above).
+    for kind, pat in _PII_PATTERNS:
+        if pat.search(window) and kind not in sig.sensitive_field_hits:
+            sig.sensitive_field_hits.append(kind)
     return sig
 
 

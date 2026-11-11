@@ -15,10 +15,10 @@
     "sensitive_data_classes": ["PHI", "PII", "SECRET"],
 
     "egress_policy": {
-      "_comment": "Phase B — a tool result about to be sent to a model endpoint. 'Local read' is not 'may ship to an external model'. Destination class: local (LAN/self-hosted), approved (company-sanctioned), external (anything else). Fast path: local dest + no scan hit + not oversize -> ALLOW without OPA/CISO.",
+      "_comment": "Phase B — a tool result about to be sent to a model endpoint. 'Local read' is not 'may ship to an external model'. Destination class is resolved from the REAL upstream host (GATEWAY_UPSTREAM_API_BASE, set by entrypoint.sh) via ipaddress checks — never from the GATEWAY_ROUTE_MODE label, which is an operator's declared intent, not a verified network fact. local = loopback/private/link-local; approved = listed below (or DCISO_APPROVED_HOSTS); everything else = external (fail-safe default). Fast path: local dest + no scan hit + not oversize -> ALLOW without OPA/CISO.",
       "enabled": true,
       "default_dest_class": "external",
-      "route_mode_dest_class": {"ollama": "local", "proxy": "approved", "demo": "external", "test": "local"},
+      "approved_hosts": [],
       "approved_model_markers": [],
       "sensitive_field_markers": ["password", "passwd", "secret", "api_key", "apikey", "private_key", "ssn", "social security", "credit card", "身分證", "健保", "病歷", "銀行帳號"],
       "forbidden_markers": ["INTERNAL ONLY", "DO NOT DISTRIBUTE", "機密", "限內部使用", "不得外流"],

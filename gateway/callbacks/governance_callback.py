@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import ipaddress
 import json
 import os
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 try:  # available inside the LiteLLM image
     from litellm.integrations.custom_logger import CustomLogger
@@ -526,8 +528,7 @@ class GovernanceCallback(CustomLogger):
     # ------------------------------------------------------------------ #
     _EGRESS_POLICY_DEFAULT = {
         "enabled": True, "default_dest_class": "external",
-        "route_mode_dest_class": {"ollama": "local", "proxy": "approved",
-                                  "demo": "external", "test": "local"},
+        "approved_hosts": [],
         "sensitive_field_markers": ["password", "secret", "api_key", "private_key",
                                     "ssn", "credit card"],
         "forbidden_markers": ["INTERNAL ONLY", "DO NOT DISTRIBUTE", "機密", "不得外流"],
@@ -555,17 +556,58 @@ class GovernanceCallback(CustomLogger):
             self._egress_policy_cache = fetched if isinstance(fetched, dict) else self._EGRESS_POLICY_DEFAULT
         return self._egress_policy_cache
 
+    @staticmethod
+    def _resolved_upstream_host() -> str:
+        """The host this request is ACTUALLY being sent to — set once at
+        container start by entrypoint.sh from the real OLLAMA_BASE_URL /
+        OPENAI_BASE_URL / HERMES_PROXY_URL, independent of which route mode
+        produced it. This is the one place dest_class should look; a mode
+        *label* (GATEWAY_ROUTE_MODE) is an operator's declared intent, not
+        proof of where traffic actually goes — trusting it let a route
+        labelled "local" ship sensitive data to a genuinely external host
+        with zero verification."""
+        base = os.environ.get("GATEWAY_UPSTREAM_API_BASE", "")
+        try:
+            return (urlparse(base).hostname or "").strip().lower()
+        except ValueError:
+            return ""
+
+    @staticmethod
+    def _host_is_local(host: str) -> bool:
+        if not host:
+            return False
+        if host in ("localhost", "localhost.localdomain") or host.endswith(".local"):
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False  # a real hostname (not a literal IP) is never assumed local
+        return ip.is_loopback or ip.is_private or ip.is_link_local
+
     def _dest_class(self, data: dict, policy: dict) -> str:
         forced = os.environ.get("DCISO_EGRESS_DEST_CLASS")
         if forced:
             return forced.lower()
+
         model = str(data.get("model") or "")
         for marker in policy.get("approved_model_markers", []):
             if marker and str(marker) in model:
                 return "approved"
-        rm = os.environ.get("GATEWAY_ROUTE_MODE", "")
-        by_rm = (policy.get("route_mode_dest_class") or {}).get(rm)
-        return str(by_rm or policy.get("default_dest_class", "external")).lower()
+
+        host = self._resolved_upstream_host()
+        if not host:
+            # Upstream couldn't be resolved at all -> fail safe, never guess "local".
+            return str(policy.get("default_dest_class", "external")).lower()
+        if self._host_is_local(host):
+            return "local"
+
+        approved = {str(h).strip().lower() for h in policy.get("approved_hosts", []) if str(h).strip()}
+        env_approved = {h.strip().lower() for h in os.environ.get("DCISO_APPROVED_HOSTS", "").split(",") if h.strip()}
+        approved |= env_approved
+        if host in approved or any(host == a or host.endswith("." + a) for a in approved):
+            return "approved"
+
+        return str(policy.get("default_dest_class", "external")).lower()
 
     async def _govern_tool_results(self, data: dict, md: dict) -> None:
         if not self._egress_gate:
