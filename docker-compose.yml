@@ -85,6 +85,7 @@ services:
       UPSTREAM_MODEL: ${UPSTREAM_MODEL:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      OLLAMA_EXPOSE_ALL_MODELS: ${OLLAMA_EXPOSE_ALL_MODELS:-1}
       OPA_URL: http://opa:8181
       OPA_DECISION_PATH: dciso/governance/decision
       OPA_TIMEOUT_SECONDS: ${OPA_TIMEOUT_SECONDS:-3}
@@ -104,6 +105,8 @@ services:
       DCISO_OUTPUT_MAX_SCAN: ${DCISO_OUTPUT_MAX_SCAN:-200000}
       DCISO_EGRESS_GATE: ${DCISO_EGRESS_GATE:-1}
       DCISO_EGRESS_DEST_CLASS: ${DCISO_EGRESS_DEST_CLASS:-}
+      DCISO_APPROVED_HOSTS: ${DCISO_APPROVED_HOSTS:-}
+      DCISO_FORCE_EXTERNAL_HOSTS: ${DCISO_FORCE_EXTERNAL_HOSTS:-}
     volumes:
       - audit-data:/data
     ports:
@@ -121,6 +124,8 @@ services:
       context: .
       dockerfile: pep/Dockerfile
     image: dciso/pep:0.1.0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach the host CISO-as-Hermes sidecar (Linux needs this explicit mapping; Docker Desktop provides it for free)
     depends_on:
       opa:
         condition: service_healthy

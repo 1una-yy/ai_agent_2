@@ -43,6 +43,28 @@ elif [ "$MODE" = "ollama" ]; then
   export GATEWAY_UPSTREAM_API_BASE="${OLLAMA_BASE_URL%/}"
   export GATEWAY_UPSTREAM_API_KEY="ollama-unused"
   echo "[gateway] route mode=ollama upstream=$GATEWAY_UPSTREAM_MODEL via $GATEWAY_UPSTREAM_API_BASE"
+
+  # Let the GOVERNED client pick among any tool-capable model on this SAME
+  # on-prem Ollama server, not just $OLLAMA_MODEL — every generated entry is
+  # still pinned to this one api_base/api_key, so this only widens model
+  # CHOICE, never the set of reachable endpoints; every request is still
+  # intercepted by governance_callback regardless of which entry matched.
+  # Set OLLAMA_EXPOSE_ALL_MODELS=0 to keep only the single fixed model.
+  # NB: the generated file MUST live next to config.yaml (i.e. in /app) —
+  # LiteLLM resolves `callbacks:` relative to the config file's own
+  # directory, so writing this to /tmp would break the
+  # gateway.callbacks.governance_callback import and silently run ungoverned.
+  if [ "${OLLAMA_EXPOSE_ALL_MODELS:-1}" != "0" ]; then
+    if python3 /app/gateway/gen_ollama_model_list.py \
+         --base "$GATEWAY_UPSTREAM_API_BASE" \
+         --template /app/config.yaml \
+         --out /app/config.generated.yaml \
+         --default-model "$GATEWAY_UPSTREAM_MODEL"; then
+      CONFIG_FILE=/app/config.generated.yaml
+    else
+      echo "[gateway] model-list generation failed — continuing with only the fixed default model" >&2
+    fi
+  fi
 else
   export GATEWAY_UPSTREAM_MODEL="openai/mock-governed-model"
   export GATEWAY_UPSTREAM_API_BASE="${MOCK_LLM_BASE:-http://mock-llm:8080/v1}"
@@ -50,4 +72,4 @@ else
   echo "[gateway] route mode=test upstream=mock-llm ($GATEWAY_UPSTREAM_API_BASE)"
 fi
 
-exec litellm --config /app/config.yaml --host 0.0.0.0 --port 4000
+exec litellm --config "${CONFIG_FILE:-/app/config.yaml}" --host 0.0.0.0 --port 4000

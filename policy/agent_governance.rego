@@ -131,6 +131,16 @@ shell_has_blocked if {
 	contains(lower(shell_cmd), lower(p))
 }
 
+# Dual-use readonly binaries: the binary itself is normally read-only, but a
+# specific flag turns THIS invocation into a write/exec action (`sed -i`,
+# `find -delete`/`-exec`, `sort -o`, `yq -i`, …). Checked by binary so e.g.
+# `cat -i` (not a real cat flag, harmless) never falsely blocks — only the
+# documented dangerous flag for THAT specific binary counts.
+shell_has_blocked if {
+	some f in object.get(dciso.shell.dual_use_write_flags, shell_first_token, [])
+	contains(shell_cmd, f)
+}
+
 shell_readonly if {
 	is_shell_tool
 	shell_cmd != ""
@@ -245,6 +255,7 @@ _out := object.get(input.proposed_action, "arguments", {})
 out_credential_hits := n if { is_output_event; n := object.get(_out, "credential_hits", 0) }
 out_forbidden_hits := n if { is_output_event; n := object.get(_out, "forbidden_hits", 0) }
 out_pii_hits := n if { is_output_event; n := object.get(_out, "pii_hits", 0) }
+out_truncated_scan if { is_output_event; object.get(_out, "truncated_scan", false) == true }
 out_recipient := lower(sprintf("%v", [object.get(_out, "recipient_class", "user")]))
 
 # a forbidden-disclosure marker in the answer -> block
@@ -274,6 +285,14 @@ modify_reasons contains "REDACT_OUTPUT_CREDENTIAL" if {
 modify_reasons contains "REDACT_OUTPUT_PII" if {
 	is_output_event
 	out_pii_hits > 0
+}
+
+# the answer is longer than the scan window — we have NO signal on the
+# unscanned tail at all, so it must never be delivered blind (ticket
+# remediation §3).
+modify_reasons contains "OUTPUT_TRUNCATE_UNSCANNED" if {
+	is_output_event
+	out_truncated_scan
 }
 
 # --------------------------------------------------------------------------- #

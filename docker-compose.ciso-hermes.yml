@@ -3,11 +3,13 @@
 # In this mode the AI CISO is NOT the small containerised rule/LLM service.
 # It is a separate, tool-less Hermes instance (its own HERMES_HOME, its own
 # model straight to Ollama — never through this gateway) invoked by an advisor
-# sidecar running on the HOST at 127.0.0.1:9009.
+# sidecar running on the HOST at 127.0.0.1:$HOST_CISO_PORT (default 9009;
+# `bin/dciso` exports HOST_CISO_PORT for this file's substitution — set it
+# yourself if driving compose directly instead of via `dciso up-ollama`).
 #
 # This file therefore:
 #   * stops the containerised `ciso-advisor` from starting (profile never enabled)
-#   * repoints gateway + pep at the host sidecar via host.docker.internal:9009
+#   * repoints gateway + pep at the host sidecar via host.docker.internal:$HOST_CISO_PORT
 #   * drops their `depends_on: ciso-advisor` (needs Compose v2.24+ for !override)
 #
 # Bring the stack up with BOTH files (dciso does this for you):
@@ -22,11 +24,11 @@ services:
       opa:
         condition: service_healthy
     environment:
-      CISO_ADVISOR_URL: http://host.docker.internal:9009
+      CISO_ADVISOR_URL: http://host.docker.internal:${HOST_CISO_PORT:-9009}
 
   pep:
     depends_on: !override
       opa:
         condition: service_healthy
     environment:
-      CISO_ADVISOR_URL: http://host.docker.internal:9009
+      CISO_ADVISOR_URL: http://host.docker.internal:${HOST_CISO_PORT:-9009}

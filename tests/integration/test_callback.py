@@ -296,6 +296,89 @@ async def test_output_forbidden_marker_is_blocked(cb):
 
 
 # --------------------------------------------------------------------------- #
+# ticket remediation §3 — a reply's free text must be checked by the output
+# policy even when it ALSO carries tool calls (previously the output gate was
+# only reached when there were NO proposed tool-call events at all).
+# --------------------------------------------------------------------------- #
+def _decision_by_event_type(tool_result, output_result):
+    """respx side_effect: the SAME /decision endpoint is hit once for the
+    tool-call event and once for the output(text) event in a mixed reply —
+    answer each differently based on input.event_type."""
+    def _side_effect(request):
+        body = json.loads(request.content)
+        event_type = (body.get("input") or {}).get("event_type")
+        payload = output_result if event_type == "model.output.proposed" else tool_result
+        return httpx.Response(200, json={"result": payload})
+    return _side_effect
+
+
+@respx.mock
+async def test_mixed_reply_text_pii_still_redacted_alongside_allowed_tool_call(cb):
+    respx.get(url__regex=r".*/v1/data/dciso/output_policy.*").mock(
+        return_value=httpx.Response(200, json={"result": {"enabled": True, "forbidden_markers": []}}))
+    respx.post("http://ciso-advisor:9000/advise").mock(
+        return_value=httpx.Response(200, json={"advice": "ALLOW", "risk_score": 1, "risk_level": "LOW"}))
+    respx.post(url__regex=r".*/v1/data/dciso/governance/decision.*").mock(side_effect=_decision_by_event_type(
+        tool_result={"decision": "ALLOW", "reason_codes": ["POLICY_ALLOW"], "obligations": {}, "policy_version": "v0.1.0"},
+        output_result={"decision": "MODIFY", "reason_codes": ["REDACT_OUTPUT_PII"], "obligations": {}, "policy_version": "v0.1.0"},
+    ))
+    resp = _mk_response(
+        content="his number is A199456780, let me check the file",
+        tool_calls=[_tc("read_file", {"path": "/a"})])
+    out = await cb.governance_handler_instance.async_post_call_success_hook(_data(), None, resp)
+    # text was redacted even though the tool call itself was ALLOW
+    assert "A199456780" not in out.choices[0].message.content
+    assert "已遮蔽" in out.choices[0].message.content
+    # the allowed tool call is still intact — the text verdict didn't erase it
+    assert out.choices[0].message.tool_calls is not None
+
+
+@respx.mock
+async def test_output_text_exceeding_scan_limit_tail_is_truncated_not_delivered(cb, monkeypatch):
+    monkeypatch.setattr(cb.governance_handler_instance, "_output_max_scan", 20)
+    respx.get(url__regex=r".*/v1/data/dciso/output_policy.*").mock(
+        return_value=httpx.Response(200, json={"result": {"enabled": True, "forbidden_markers": []}}))
+    respx.post("http://ciso-advisor:9000/advise").mock(
+        return_value=httpx.Response(200, json={"advice": "ALLOW", "risk_score": 1, "risk_level": "LOW"}))
+    respx.post(url__regex=r".*/v1/data/dciso/governance/decision.*").mock(return_value=httpx.Response(200, json={
+        "result": {"decision": "MODIFY", "reason_codes": ["OUTPUT_TRUNCATE_UNSCANNED"],
+                   "obligations": {}, "policy_version": "v0.1.0"}}))
+    text = ("A" * 20) + "RAW-SECRET-TAIL-MUST-NOT-SHIP"
+    resp = _mk_response(content=text)
+    out = await cb.governance_handler_instance.async_post_call_success_hook(_data(), None, resp)
+    assert "RAW-SECRET-TAIL-MUST-NOT-SHIP" not in out.choices[0].message.content
+    assert "截斷" in out.choices[0].message.content
+
+
+@respx.mock
+async def test_mixed_reply_pii_redacted_via_buffered_streaming_path(cb):
+    """Same §3 fix, exercised through the buffered-streaming hook — a mixed
+    tool_call + PII-text reply must come out redacted there too."""
+    respx.get(url__regex=r".*/v1/data/dciso/output_policy.*").mock(
+        return_value=httpx.Response(200, json={"result": {"enabled": True, "forbidden_markers": []}}))
+    respx.post("http://ciso-advisor:9000/advise").mock(
+        return_value=httpx.Response(200, json={"advice": "ALLOW", "risk_score": 1, "risk_level": "LOW"}))
+    respx.post(url__regex=r".*/v1/data/dciso/governance/decision.*").mock(side_effect=_decision_by_event_type(
+        tool_result={"decision": "ALLOW", "reason_codes": ["POLICY_ALLOW"], "obligations": {}, "policy_version": "v0.1.0"},
+        output_result={"decision": "MODIFY", "reason_codes": ["REDACT_OUTPUT_PII"], "obligations": {}, "policy_version": "v0.1.0"},
+    ))
+    src = [
+        _stream_chunk(content="his number is A199456780"),
+        _stream_chunk(tool_calls=[{"index": 0, "id": "call_1", "type": "function",
+                                   "function": {"name": "read_file", "arguments": "{}"}}]),
+        _stream_chunk(finish="tool_calls"),
+    ]
+    out = [c async for c in cb.governance_handler_instance.async_post_call_streaming_iterator_hook(
+        None, _aiter(src), _data())]
+    text = "".join((c["choices"][0]["delta"].get("content") or "") for c in out)
+    assert "A199456780" not in text
+    assert "已遮蔽" in text
+    # tool call MODIFY-path keeps the (unmodified, since no argument_overrides
+    # were given) tool call in the stream
+    assert any(c["choices"][0]["delta"].get("tool_calls") for c in out)
+
+
+# --------------------------------------------------------------------------- #
 # Phase B — egress governance (tool result before it reaches a model)
 # --------------------------------------------------------------------------- #
 def _data_with_tool_result(content):
@@ -371,6 +454,73 @@ async def test_egress_forbidden_marker_withheld(cb, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# ticket remediation §2 — an unexpected failure during egress checking must
+# withhold the affected tool result(s) rather than let the unscanned original
+# through to the upstream model.
+# --------------------------------------------------------------------------- #
+def _data_with_two_tool_results(content_a, content_b):
+    return {
+        "model": "governed-model",
+        "messages": [
+            {"role": "user", "content": "do two things"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                _tc("terminal", {"command": "ls"}), _tc("terminal", {"command": "cat f"})]},
+            {"role": "tool", "tool_call_id": "call_1", "content": content_a},
+            {"role": "tool", "tool_call_id": "call_2", "content": content_b},
+        ],
+        "metadata": {"harness_type": "hermes", "session_id": "sess-1"},
+        "litellm_call_id": "lc-b2",
+    }
+
+
+@respx.mock
+async def test_egress_scan_exception_withholds_that_result_not_leaks_raw(cb, monkeypatch):
+    monkeypatch.setenv("DCISO_EGRESS_DEST_CLASS", "external")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("scan blew up")
+    monkeypatch.setattr("gateway.callbacks.governance_callback.output_scan.scan_payload", _boom)
+
+    d = _data_with_tool_result("super secret raw payload that must never ship unscanned")
+    out = await cb.governance_handler_instance.async_pre_call_hook(None, None, d, "completion")
+    assert "super secret raw payload" not in out["messages"][2]["content"]
+
+
+@respx.mock
+async def test_egress_failure_mid_loop_does_not_leak_later_messages(cb, monkeypatch):
+    """Two tool results in one request; the scan throws on EVERY call. Neither
+    message's raw content may survive — a failure on the first must not cause
+    the second (not-yet-processed) message to be sent through untouched."""
+    monkeypatch.setenv("DCISO_EGRESS_DEST_CLASS", "external")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("scan blew up")
+    monkeypatch.setattr("gateway.callbacks.governance_callback.output_scan.scan_payload", _boom)
+
+    d = _data_with_two_tool_results("RAW-SECRET-A-must-not-leak", "RAW-SECRET-B-must-not-leak")
+    out = await cb.governance_handler_instance.async_pre_call_hook(None, None, d, "completion")
+    assert "RAW-SECRET-A-must-not-leak" not in out["messages"][2]["content"]
+    assert "RAW-SECRET-B-must-not-leak" not in out["messages"][3]["content"]
+
+
+@respx.mock
+async def test_egress_policy_fetch_failure_withholds_all_tool_results(cb, monkeypatch):
+    """A failure ABOVE the per-message loop (e.g. policy resolution itself
+    blowing up, not just one message's scan) must fail closed for every tool
+    result in the request, not just continue with defaults."""
+    monkeypatch.setenv("DCISO_EGRESS_DEST_CLASS", "external")
+
+    async def _boom():
+        raise RuntimeError("policy fetch blew up")
+    monkeypatch.setattr(cb.governance_handler_instance, "_get_egress_policy", _boom)
+
+    d = _data_with_two_tool_results("RAW-SECRET-A-must-not-leak", "RAW-SECRET-B-must-not-leak")
+    out = await cb.governance_handler_instance.async_pre_call_hook(None, None, d, "completion")
+    assert "RAW-SECRET-A-must-not-leak" not in out["messages"][2]["content"]
+    assert "RAW-SECRET-B-must-not-leak" not in out["messages"][3]["content"]
+
+
+# --------------------------------------------------------------------------- #
 # dest_class resolution — must reflect the REAL upstream host, never just the
 # GATEWAY_ROUTE_MODE label (a route labelled "ollama"/"local" pointed at a
 # genuinely public host must NOT be classified "local").
@@ -413,6 +563,37 @@ def test_dest_class_approved_hosts_allowlist(cb, monkeypatch):
     monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "https://llm.partner.example.com/v1")
     policy = dict(cb.GovernanceCallback._EGRESS_POLICY_DEFAULT, approved_hosts=["partner.example.com"])
     assert cb.governance_handler_instance._dest_class({}, policy) == "approved"
+
+
+def test_dest_class_approved_hosts_via_env(cb, monkeypatch):
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "https://llm.partner.example.com/v1")
+    monkeypatch.setenv("DCISO_APPROVED_HOSTS", "partner.example.com")
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "approved"
+
+
+def test_dest_class_force_external_overrides_private_ip(cb, monkeypatch):
+    # ticket remediation §4 — a LAN proxy that itself relays to the cloud: the
+    # gateway only sees this private-IP first hop, so without an explicit
+    # declaration it would be wrongly trusted as "local".
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "http://192.168.1.50:8080/v1")
+    policy = dict(cb.GovernanceCallback._EGRESS_POLICY_DEFAULT, force_external_hosts=["192.168.1.50"])
+    assert cb.governance_handler_instance._dest_class({}, policy) == "external"
+
+
+def test_dest_class_force_external_via_env(cb, monkeypatch):
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "http://192.168.1.50:8080/v1")
+    monkeypatch.setenv("DCISO_FORCE_EXTERNAL_HOSTS", "192.168.1.50")
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "external"
+
+
+def test_dest_class_without_force_external_private_ip_stays_local(cb, monkeypatch):
+    # sanity counterpart — direct-to-LAN-Ollama must still classify "local"
+    # when the operator has NOT declared it as a forwarding proxy.
+    monkeypatch.setenv("GATEWAY_UPSTREAM_API_BASE", "http://192.168.1.50:11434/v1")
+    policy = cb.GovernanceCallback._EGRESS_POLICY_DEFAULT
+    assert cb.governance_handler_instance._dest_class({}, policy) == "local"
 
 
 def test_dest_class_explicit_override_still_wins(cb, monkeypatch):

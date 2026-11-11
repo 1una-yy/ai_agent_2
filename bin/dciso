@@ -96,7 +96,7 @@ cmd_setup() {
 cmd_up() {
   need_docker
   GATEWAY_ROUTE_MODE=test $COMPOSE up -d --build
-  _wait_healthy
+  _wait_healthy || die "stack did not become healthy in time — check 'dciso logs' / 'docker compose logs'"
   say ""
   ok  "governance stack is up (offline test mode)"
   say "  gateway   : http://127.0.0.1:4000   (token: $(gw_key))"
@@ -109,7 +109,7 @@ cmd_demo() {
   load_env
   case "${OPENAI_API_KEY:-}" in ""|sk-REPLACE_ME) die "Put a real OPENAI_API_KEY in .env first (dciso setup created it).";; esac
   GATEWAY_ROUTE_MODE=demo CISO_MODE=llm $COMPOSE up -d --build
-  _wait_healthy
+  _wait_healthy || die "stack did not become healthy in time — check 'dciso logs' / 'docker compose logs'"
   say ""
   ok  "governance stack is up in DEMO mode — gateway routes to real OpenAI, CISO uses an LLM"
   say "  dashboard : http://127.0.0.1:8900"
@@ -125,7 +125,7 @@ cmd_gemini() {
   GATEWAY_ROUTE_MODE=gemini CISO_MODE=rule \
     GATEWAY_UPSTREAM_MODEL="${GEMINI_MODEL:-gemini/gemini-3.8-flash}" \
     $COMPOSE up -d --build
-  _wait_healthy
+  _wait_healthy || die "stack did not become healthy in time — check 'dciso logs' / 'docker compose logs'"
   say ""
   ok  "governance stack is up — gateway routes to Google Gemini, CISO uses the instant rule engine"
   say "  dashboard : http://127.0.0.1:8900"
@@ -147,6 +147,7 @@ _wait_healthy() {
     printf '.'; sleep 2
   done
   printf '\n'; warn "services did not all report healthy in time — check 'dciso logs'"
+  return 1
 }
 
 # ---- CISO-as-Hermes: host-side advisor sidecar -------------------------- #
@@ -473,7 +474,7 @@ cmd_up_proxy() {
     HERMES_PROXY_URL="$purl" UPSTREAM_MODEL="$umodel" \
     CISO_LLM_BASE_URL="$purl" CISO_LLM_MODEL="$cmodel" \
     $COMPOSE up -d --build
-  _wait_healthy
+  _wait_healthy || die "stack did not become healthy in time — check 'dciso logs' / 'docker compose logs'"
   say ""
   ok "stack up — the Business model is your logged-in ${prov} model."
   say "  upstream model : $umodel"
@@ -536,8 +537,9 @@ cmd_up_ollama() {
     CISO_TIMEOUT_SECONDS="$ciso_http_to" \
     GATEWAY_DEFAULT_HARNESS="$agent" \
     OLLAMA_BASE_URL="$base" OLLAMA_MODEL="$model" \
+    HOST_CISO_PORT="$HOST_CISO_PORT" \
     $COMPOSE "${files[@]}" up -d --build
-  _wait_healthy
+  _wait_healthy || die "stack did not become healthy in time — check 'dciso logs' / 'docker compose logs'"
   say ""
   ok "stack up — Business model is Ollama '$model' on $base."
   if [ -z "$agent" ]; then

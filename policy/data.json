@@ -15,10 +15,11 @@
     "sensitive_data_classes": ["PHI", "PII", "SECRET"],
 
     "egress_policy": {
-      "_comment": "Phase B — a tool result about to be sent to a model endpoint. 'Local read' is not 'may ship to an external model'. Destination class is resolved from the REAL upstream host (GATEWAY_UPSTREAM_API_BASE, set by entrypoint.sh) via ipaddress checks — never from the GATEWAY_ROUTE_MODE label, which is an operator's declared intent, not a verified network fact. local = loopback/private/link-local; approved = listed below (or DCISO_APPROVED_HOSTS); everything else = external (fail-safe default). Fast path: local dest + no scan hit + not oversize -> ALLOW without OPA/CISO.",
+      "_comment": "Phase B — a tool result about to be sent to a model endpoint. 'Local read' is not 'may ship to an external model'. Destination class is resolved from the REAL upstream host (GATEWAY_UPSTREAM_API_BASE, set by entrypoint.sh) via ipaddress checks — never from the GATEWAY_ROUTE_MODE label, which is an operator's declared intent, not a verified network fact. force_external_hosts (or DCISO_FORCE_EXTERNAL_HOSTS) overrides the private-IP check for a LAN proxy/relay that forwards on to a cloud endpoint — checked first, so it can only make a host MORE strict, never less. Otherwise: local = loopback/private/link-local; approved = listed below (or DCISO_APPROVED_HOSTS); everything else = external (fail-safe default). Fast path: local dest + no scan hit + not oversize -> ALLOW without OPA/CISO.",
       "enabled": true,
       "default_dest_class": "external",
       "approved_hosts": [],
+      "force_external_hosts": [],
       "approved_model_markers": [],
       "sensitive_field_markers": ["password", "passwd", "secret", "api_key", "apikey", "private_key", "ssn", "social security", "credit card", "身分證", "健保", "病歷", "銀行帳號"],
       "forbidden_markers": ["INTERNAL ONLY", "DO NOT DISTRIBUTE", "機密", "限內部使用", "不得外流"],
@@ -48,7 +49,14 @@
       "readonly_binaries": ["ls", "ll", "dir", "cat", "bat", "less", "more", "head", "tail", "pwd", "cd", "find", "fd", "tree", "stat", "file", "wc", "du", "df", "grep", "rg", "ag", "which", "type", "whoami", "id", "groups", "hostname", "uname", "date", "cal", "echo", "printf", "env", "printenv", "ps", "top", "free", "uptime", "lsblk", "lscpu", "readlink", "realpath", "basename", "dirname", "md5sum", "sha256sum", "sort", "uniq", "cut", "awk", "sed", "jq", "yq", "column", "nl", "tac", "diff", "cmp"],
       "destructive_binaries": ["rm", "rmdir", "unlink", "shred", "mv", "cp", "dd", "mkfs", "truncate", "tee", "curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "rsync", "sudo", "su", "kill", "pkill", "killall", "reboot", "shutdown", "halt", "poweroff", "systemctl", "service", "apt", "apt-get", "yum", "dnf", "brew", "pacman", "docker", "kubectl", "crontab", "at", "mount", "umount", "iptables", "ufw", "passwd", "useradd", "userdel", "usermod", "chmod", "chown", "chgrp", "eval", "exec", "source", "chattr", "setfacl", "ln"],
       "destructive_patterns": ["rm -rf", "rm -fr", ":(){", "> /dev/", "mkfs", "git push", "git reset --hard", "git clean", "pip install", "pip3 install", "npm install", "npm i ", "yarn add", "pnpm add", "history -c", "chmod +x", "chmod 777"],
-      "metachars": [";", "|", "&", "$(", "`", "\n", "\r", "\\", " > ", " >> ", "||", "&&", "$(", ">/"]
+      "metachars": [";", "|", "&", "$(", "`", "\n", "\r", "\\", " > ", " >> ", "||", "&&", "$(", ">/", ">", "<("],
+      "_comment_dual_use": "Binaries in readonly_binaries whose SPECIFIC flags make one invocation a write/exec action rather than a read. Checked in addition to metachars/destructive_patterns — e.g. `sed -n '1p' f` stays read-only, `sed -i` does not.",
+      "dual_use_write_flags": {
+        "sed": ["-i", "--in-place"],
+        "find": ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprintf"],
+        "sort": ["-o", "--output"],
+        "yq": ["-i", "--in-place"]
+      }
     },
 
     "path_policy": {

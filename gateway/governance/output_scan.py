@@ -111,6 +111,18 @@ def redact(text: str | None, max_scan: int = 200_000) -> str:
     return head + tail
 
 
+def truncate_unscanned(text: str | None, max_chars: int) -> str:
+    """Drop everything past the scanned character window (the same slice
+    `scan_text` used to produce its signals) and append a marker. Used when
+    OPA returns MODIFY(`OUTPUT_TRUNCATE_UNSCANNED`) — a reply longer than the
+    scan window must never deliver its unscanned tail verbatim just because
+    the scanned PREFIX happened to come back clean."""
+    text = text or ""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n…[治理：內容過長，後段未掃描，已截斷]"
+
+
 # --------------------------------------------------------------------------- #
 # Egress side (Phase B) — a tool result about to be sent to a model endpoint.
 # --------------------------------------------------------------------------- #

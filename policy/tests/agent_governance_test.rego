@@ -202,6 +202,68 @@ test_non_shell_dangerous_tool_still_denied if {
 }
 
 # --------------------------------------------------------------------------- #
+# 2e. ticket fix — dual-use readonly binaries and bare redirection must not
+# slip through the readonly fast path. (Remediation task §1.)
+# --------------------------------------------------------------------------- #
+test_sed_print_only_is_readonly if {
+	evt := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "sed -n '1p' note.txt"}})
+	d := governance.decision with input as evt
+	d.decision == "ALLOW"
+}
+
+test_sed_inplace_edit_denied if {
+	evt := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "sed -i 's/a/b/' note.txt"}})
+	d := governance.decision with input as evt
+	d.decision == "DENY"
+	"DANGEROUS_SHELL_COMMAND:sed" in d.reason_codes
+}
+
+test_echo_redirect_write_not_readonly if {
+	evt := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "echo hi>note.txt"}})
+	d := governance.decision with input as evt
+	d.decision != "ALLOW"
+}
+
+test_find_delete_denied if {
+	evt := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "find . -name '*.tmp' -delete"}})
+	d := governance.decision with input as evt
+	d.decision == "DENY"
+	"DANGEROUS_SHELL_COMMAND:find" in d.reason_codes
+}
+
+test_find_exec_denied if {
+	evt := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "find . -name '*.sh' -exec sh {} \\;"}})
+	d := governance.decision with input as evt
+	d.decision == "DENY"
+}
+
+test_find_plain_listing_still_readonly if {
+	evt := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "find . -name '*.tmp'"}})
+	d := governance.decision with input as evt
+	d.decision == "ALLOW"
+}
+
+# Model proposal (①) and Hermes pre-dispatch (②) must agree — same shell
+# command, only enforcement_phase differs.
+test_sed_inplace_denied_consistently_across_proposal_and_dispatch if {
+	evt1 := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "sed -i 's/a/b/' note.txt"}})
+	evt2 := object.union(evt1, {"enforcement_phase": "tool_execution_pre_dispatch"})
+	d1 := governance.decision with input as evt1
+	d2 := governance.decision with input as evt2
+	d1.decision == d2.decision
+	d1.decision == "DENY"
+}
+
+test_readonly_sed_allowed_consistently_across_proposal_and_dispatch if {
+	evt1 := with_action(base_tool_event, {"canonical_name": "terminal", "native_name": "terminal", "arguments": {"command": "sed -n '1p' note.txt"}})
+	evt2 := object.union(evt1, {"enforcement_phase": "tool_execution_pre_dispatch"})
+	d1 := governance.decision with input as evt1
+	d2 := governance.decision with input as evt2
+	d1.decision == d2.decision
+	d1.decision == "ALLOW"
+}
+
+# --------------------------------------------------------------------------- #
 # 3. dangerous tool -> DENY (§7 rule 5)
 # --------------------------------------------------------------------------- #
 test_terminal_denied if {

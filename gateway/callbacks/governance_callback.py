@@ -152,12 +152,18 @@ class GovernanceCallback(CustomLogger):
 
         # Egress boundary (Phase B): tool results in this request are about to be
         # sent to a model endpoint. "Local read" is not "may ship anywhere".
+        # Fail CLOSED: `_govern_tool_results` already isolates a per-message
+        # scan/decision failure so one bad message doesn't block the rest, but
+        # if something fails ABOVE that per-message loop (policy fetch, the
+        # message-list walk itself, ...) we can no longer vouch for ANY tool
+        # result in this request — withhold all of them rather than let an
+        # ungoverned call through (ticket remediation §2).
         try:
             await self._govern_tool_results(data, self._resolved_meta(data))
         except GovernanceReject:
             raise
-        except Exception:  # noqa: BLE001 - egress gate must not break the request
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self._withhold_all_tool_results(data, exc)
         # Phase E — mark when the request leaves us, so the response pass can
         # split "model time" (this -> post_call) from "governance time".
         md["dciso_runtime"]["t_precall_done"] = time.perf_counter()
@@ -202,37 +208,63 @@ class GovernanceCallback(CustomLogger):
         """Run the governance pipeline over a (already assembled) response dict.
 
         Returns an EnforcementDispatch, or None when there is nothing to govern
-        (plain response) — in which case a passthrough audit row is written."""
+        (plain response) — in which case a passthrough audit row is written.
+
+        Tool-call governance (below) and output/text governance
+        (`_output_or_passthrough`) are run and merged independently — a reply
+        that proposes a tool call CAN also carry free text in the same
+        message, and that text must still go through the output policy
+        (ticket remediation §3: a mixed reply's text previously skipped Phase
+        A entirely because this method returned as soon as `events` was
+        non-empty)."""
         md = self._resolved_meta(data)
         adapter = select_adapter(md)
         approval_token = (md.get("dciso") or {}).get("approval_token")
 
+        tool_dispatch = None
         if adapter is None:
-            if not _has_tool_calls(resp_dict):
-                return await self._output_or_passthrough(
-                    data, resp_dict, md, passthrough_reason="NO_ADAPTER_PLAIN_RESPONSE")
-            if not self._enforce_unknown_harness:
-                return None
-            event = self._unknown_harness_event(md)
-            outcome = await self._orchestrator.evaluate(event)
-            dispatch = Enforcer(_NullAdapter(), self._tracker).enforce(
-                raw_response=resp_dict, outcomes=[outcome], approval_token=approval_token
-            )
-            self._write_audit_row(event, outcome, dispatch, data, resp_dict)
-            return dispatch
+            if _has_tool_calls(resp_dict):
+                if not self._enforce_unknown_harness:
+                    return None
+                event = self._unknown_harness_event(md)
+                outcome = await self._orchestrator.evaluate(event)
+                tool_dispatch = Enforcer(_NullAdapter(), self._tracker).enforce(
+                    raw_response=resp_dict, outcomes=[outcome], approval_token=approval_token
+                )
+                self._write_audit_row(event, outcome, tool_dispatch, data, resp_dict)
+        else:
+            events = adapter.normalize_response({**data, "metadata": md}, resp_dict)
+            if events:
+                outcomes = await asyncio.gather(*(self._orchestrator.evaluate(ev) for ev in events))
+                tool_dispatch = Enforcer(adapter, self._tracker).enforce(
+                    raw_response=resp_dict, outcomes=list(outcomes), approval_token=approval_token
+                )
+                for ev, oc in zip(events, outcomes):
+                    self._write_audit_row(ev, oc, tool_dispatch, data, resp_dict)
 
-        events = adapter.normalize_response({**data, "metadata": md}, resp_dict)
-        if not events:
+        if tool_dispatch is None:
+            # No tool call was proposed at all (or an unknown harness with no
+            # tool calls) — the original single-path behavior.
             return await self._output_or_passthrough(
                 data, resp_dict, md, passthrough_reason="NO_PROPOSED_ACTION")
 
-        outcomes = await asyncio.gather(*(self._orchestrator.evaluate(ev) for ev in events))
-        dispatch = Enforcer(adapter, self._tracker).enforce(
-            raw_response=resp_dict, outcomes=list(outcomes), approval_token=approval_token
-        )
-        for ev, oc in zip(events, outcomes):
-            self._write_audit_row(ev, oc, dispatch, data, resp_dict)
-        return dispatch
+        if tool_dispatch.result.outcome not in ("ALLOW", "MODIFY"):
+            # The tool side already DENY'd / REQUIRE_REVIEW'd: the enforcer
+            # already replaced message content with our own fixed, safe
+            # Traditional-Chinese notice (see enforcer._deny_response_body /
+            # _review_error_body) — nothing model-authored remains to scan.
+            return tool_dispatch
+
+        if not _first_choice_content(tool_dispatch.response):
+            # No free text alongside the tool call(s) at all — nothing for
+            # the output policy to look at, and no extra audit row to write.
+            return tool_dispatch
+
+        text_result = await self._output_or_passthrough(
+            data, tool_dispatch.response, md, passthrough_reason="TOOL_ALLOW_TEXT_FASTPATH")
+        if text_result is None:
+            return tool_dispatch   # text was clean — tool verdict stands alone
+        return _merge_tool_and_text_dispatch(tool_dispatch, text_result)
 
     async def _govern_response(self, data: dict, response):
         rt = data.setdefault("metadata", {}).setdefault("dciso_runtime", {})
@@ -296,12 +328,21 @@ class GovernanceCallback(CustomLogger):
                 yield c
             return
 
-        # MODIFY -> keep the (rewritten) tool call, NO narration text. Emitting
-        # any content here makes Hermes treat the turn as an error and retry.
+        # MODIFY -> keep the (rewritten) tool call. For a PURE tool-argument
+        # rewrite, no narration text is emitted (Hermes treats stray content
+        # alongside a tool-call finish as an error and retries). But when the
+        # output policy rewrote the TEXT itself (redacted a credential/PII
+        # span, or truncated an unscanned tail — ticket remediation §3), that
+        # rewritten text IS the safe payload and must still reach the
+        # client, not be silently dropped.
         if dispatch.result.outcome == "MODIFY":
             governed = _as_dict_choices(dispatch.response)
             gov_tool_calls = _first_choice_tool_calls(governed)
-            for c in _synth_stream_chunks(chunks, "", tool_calls=gov_tool_calls):
+            if set(dispatch.result.reason_codes) & _TEXT_MODIFY_REASON_CODES:
+                text = _first_choice_content(governed) or ""
+            else:
+                text = ""
+            for c in _synth_stream_chunks(chunks, text, tool_calls=gov_tool_calls):
                 yield c
             return
 
@@ -458,13 +499,17 @@ class GovernanceCallback(CustomLogger):
 
         sig = output_scan.scan_text(text, policy.get("forbidden_markers"), self._output_max_scan)
 
-        # fast path — nothing interesting, cheap audit, no CISO, no OPA
-        if not sig.any_hit and not sensitive and recipient != "external":
+        # fast path — nothing interesting, cheap audit, no CISO, no OPA.
+        # A reply longer than the scan window can NEVER take this path: the
+        # unscanned tail is, by definition, content we have no signal on at
+        # all (ticket remediation §3 — "超過掃描上限的內容...不得原樣送出").
+        if not sig.any_hit and not sensitive and recipient != "external" and not sig.truncated_scan:
             return "FASTPATH"
 
         esc_reason = ("forbidden_hit" if sig.forbidden_hits else
                       "sensitive_task" if sensitive else
-                      "external_recipient" if recipient == "external" else None)
+                      "external_recipient" if recipient == "external" else
+                      "truncated_scan" if sig.truncated_scan else None)
         escalate = esc_reason is not None
         event = self._output_event(md, sig, recipient, classes)
         event.correlation_id = data.get("litellm_call_id") or event.correlation_id
@@ -478,7 +523,13 @@ class GovernanceCallback(CustomLogger):
         elif verdict == "REQUIRE_REVIEW":
             _set_first_choice(governed, _OUTPUT_REVIEW_ZH, drop_tools=True)
         elif verdict == "MODIFY":
-            _set_first_choice(governed, output_scan.redact(text, self._output_max_scan), drop_tools=False)
+            new_text = text
+            codes = outcome.decision.reason_codes
+            if "REDACT_OUTPUT_CREDENTIAL" in codes or "REDACT_OUTPUT_PII" in codes:
+                new_text = output_scan.redact(new_text, self._output_max_scan)
+            if "OUTPUT_TRUNCATE_UNSCANNED" in codes:
+                new_text = output_scan.truncate_unscanned(new_text, self._output_max_scan)
+            _set_first_choice(governed, new_text, drop_tools=False)
 
         dispatch = EnforcementDispatch(
             result=EnforcementResult(
@@ -529,6 +580,7 @@ class GovernanceCallback(CustomLogger):
     _EGRESS_POLICY_DEFAULT = {
         "enabled": True, "default_dest_class": "external",
         "approved_hosts": [],
+        "force_external_hosts": [],
         "sensitive_field_markers": ["password", "secret", "api_key", "private_key",
                                     "ssn", "credit card"],
         "forbidden_markers": ["INTERNAL ONLY", "DO NOT DISTRIBUTE", "機密", "不得外流"],
@@ -598,6 +650,20 @@ class GovernanceCallback(CustomLogger):
         if not host:
             # Upstream couldn't be resolved at all -> fail safe, never guess "local".
             return str(policy.get("default_dest_class", "external")).lower()
+
+        # Operator-declared exception: a host that LOOKS private (passes the
+        # IP check below) but is actually a LAN proxy/relay that forwards on
+        # to a cloud endpoint — the gateway only ever sees this first hop, so
+        # without this explicit declaration such a hop would be silently
+        # trusted as "local" and ship sensitive data onward through it
+        # unredacted. Checked BEFORE the private-IP shortcut so it can
+        # override it; never the reverse (there is no way to make a
+        # genuinely external host "local" through this list).
+        forced_external = {str(h).strip().lower() for h in policy.get("force_external_hosts", []) if str(h).strip()}
+        forced_external |= {h.strip().lower() for h in os.environ.get("DCISO_FORCE_EXTERNAL_HOSTS", "").split(",") if h.strip()}
+        if host in forced_external or any(host == f or host.endswith("." + f) for f in forced_external):
+            return "external"
+
         if self._host_is_local(host):
             return "local"
 
@@ -633,50 +699,62 @@ class GovernanceCallback(CustomLogger):
         any_governed = False
         for i in tool_idxs:
             m = msgs[i]
-            text = m.get("content")
-            if isinstance(text, list):  # multimodal tool content -> join text parts
-                text = " ".join(str(p.get("text", "")) if isinstance(p, dict) else str(p)
-                                for p in text)
-            text = text if isinstance(text, str) else ("" if text is None else str(text))
+            try:
+                text = m.get("content")
+                if isinstance(text, list):  # multimodal tool content -> join text parts
+                    text = " ".join(str(p.get("text", "")) if isinstance(p, dict) else str(p)
+                                    for p in text)
+                text = text if isinstance(text, str) else ("" if text is None else str(text))
 
-            sig = output_scan.scan_payload(
-                text, forbidden_markers=policy.get("forbidden_markers"),
-                sensitive_field_markers=policy.get("sensitive_field_markers"),
-                max_bytes=max_bytes, max_scan=self._output_max_scan)
+                sig = output_scan.scan_payload(
+                    text, forbidden_markers=policy.get("forbidden_markers"),
+                    sensitive_field_markers=policy.get("sensitive_field_markers"),
+                    max_bytes=max_bytes, max_scan=self._output_max_scan)
 
-            if dest == "local" and not sig.any_hit and not sig.oversize:
-                continue  # fast path — leave it, batch-audit below
+                if dest == "local" and not sig.any_hit and not sig.oversize:
+                    continue  # fast path — leave it, batch-audit below
 
-            any_governed = True
-            esc_reason = ("forbidden_hit" if sig.forbidden_hits else
-                          "sensitive_field" if sig.sensitive_field_hits else
-                          "sensitive_task" if (set(classes) & _SENSITIVE_CLASSES) else
-                          "external_dest" if dest == "external" else None)
-            escalate = esc_reason is not None
-            event = self._egress_event(md, sig, dest, classes)
-            event.correlation_id = data.get("litellm_call_id") or event.correlation_id
-            outcome = await self._orchestrator.evaluate(event, consult_ciso=escalate)
-            verdict = outcome.decision.decision
-            verdict = verdict.value if hasattr(verdict, "value") else str(verdict)
-            codes = list(outcome.decision.reason_codes)
+                any_governed = True
+                esc_reason = ("forbidden_hit" if sig.forbidden_hits else
+                              "sensitive_field" if sig.sensitive_field_hits else
+                              "sensitive_task" if (set(classes) & _SENSITIVE_CLASSES) else
+                              "external_dest" if dest == "external" else None)
+                escalate = esc_reason is not None
+                event = self._egress_event(md, sig, dest, classes)
+                event.correlation_id = data.get("litellm_call_id") or event.correlation_id
+                outcome = await self._orchestrator.evaluate(event, consult_ciso=escalate)
+                verdict = outcome.decision.decision
+                verdict = verdict.value if hasattr(verdict, "value") else str(verdict)
+                codes = list(outcome.decision.reason_codes)
 
-            if verdict in ("DENY", "REQUIRE_REVIEW"):
+                if verdict in ("DENY", "REQUIRE_REVIEW"):
+                    m["content"] = policy.get("withheld_notice",
+                                              self._EGRESS_POLICY_DEFAULT["withheld_notice"])
+                    m_outcome = verdict
+                elif verdict == "MODIFY":
+                    new = text
+                    if "EGRESS_REDACT_CREDENTIAL" in codes:
+                        new = output_scan.redact(new, self._output_max_scan)
+                    if "EGRESS_TRUNCATE_OVERSIZE" in codes:
+                        new = output_scan.truncate_bytes(new, max_bytes)
+                    m["content"] = new
+                    m_outcome = "MODIFY"
+                else:
+                    m_outcome = "ALLOW"
+
+                self._audit_egress_row(event, outcome, m_outcome, codes, data,
+                                       escalate, esc_reason)
+            except GovernanceReject:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # This ONE tool result couldn't be scanned/decided — withhold
+                # it and keep going so a failure on message i doesn't also
+                # leak the untouched original content of messages after it
+                # (ticket remediation §2: "partial failure mid-loop").
+                any_governed = True
                 m["content"] = policy.get("withheld_notice",
                                           self._EGRESS_POLICY_DEFAULT["withheld_notice"])
-                m_outcome = verdict
-            elif verdict == "MODIFY":
-                new = text
-                if "EGRESS_REDACT_CREDENTIAL" in codes:
-                    new = output_scan.redact(new, self._output_max_scan)
-                if "EGRESS_TRUNCATE_OVERSIZE" in codes:
-                    new = output_scan.truncate_bytes(new, max_bytes)
-                m["content"] = new
-                m_outcome = "MODIFY"
-            else:
-                m_outcome = "ALLOW"
-
-            self._audit_egress_row(event, outcome, m_outcome, codes, data,
-                                   escalate, esc_reason)
+                self._safe_audit_error(data, {}, exc)
 
         if not any_governed:
             self._audit_passthrough(data, {}, md, reason=f"EGRESS_FASTPATH_ALLOW:{dest}")
@@ -778,6 +856,24 @@ class GovernanceCallback(CustomLogger):
         except Exception:  # noqa: BLE001
             pass
 
+    def _withhold_all_tool_results(self, data: dict, exc: Exception) -> None:
+        """Backstop for a failure ABOVE the per-message loop in
+        `_govern_tool_results` (e.g. the policy fetch or the message walk
+        itself blew up) — at that point we can't vouch for ANY tool result
+        in this request, so every one of them is withheld rather than left
+        to pass through unscanned (ticket remediation §2)."""
+        msgs = data.get("messages")
+        if not isinstance(msgs, list):
+            return
+        notice = self._EGRESS_POLICY_DEFAULT["withheld_notice"] + "（治理檢查發生內部錯誤，已保守扣住，未送往模型）"
+        touched = False
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") in ("tool", "function"):
+                m["content"] = notice
+                touched = True
+        if touched:
+            self._safe_audit_error(data, {}, exc)
+
 
 class _NullAdapter:
     name = "unknown"
@@ -793,6 +889,45 @@ class _NullAdapter:
 
     def enforce(self, response, decision):
         return response
+
+
+_OUTCOME_SEVERITY = {"ALLOW": 0, "MODIFY": 1, "REQUIRE_REVIEW": 2, "DENY": 3}
+
+# MODIFY reason codes that mean "the free TEXT was rewritten" rather than
+# "only a tool-call argument was rewritten" — see the streaming MODIFY
+# handler's comment for why this distinction matters.
+_TEXT_MODIFY_REASON_CODES = {"REDACT_OUTPUT_CREDENTIAL", "REDACT_OUTPUT_PII", "OUTPUT_TRUNCATE_UNSCANNED"}
+
+
+def _merge_tool_and_text_dispatch(tool_dispatch: EnforcementDispatch,
+                                   text_dispatch: EnforcementDispatch) -> EnforcementDispatch:
+    """Combine the tool-call verdict with the independently-computed output
+    (free text) verdict for the SAME reply (ticket remediation §3). The
+    worse of the two wins; `text_dispatch.response` is used as-is because it
+    was built on top of `tool_dispatch.response` (see `_evaluate`), so it
+    already carries forward whatever the tool side did to tool_calls."""
+    tool_sev = _OUTCOME_SEVERITY.get(tool_dispatch.result.outcome, 0)
+    text_sev = _OUTCOME_SEVERITY.get(text_dispatch.result.outcome, 0)
+    primary = text_dispatch if text_sev >= tool_sev else tool_dispatch
+    merged_codes = sorted(set(tool_dispatch.result.reason_codes) | set(text_dispatch.result.reason_codes))
+    result = EnforcementResult(
+        outcome=primary.result.outcome,
+        event_id=primary.result.event_id,
+        reason_codes=merged_codes,
+        user_message=primary.result.user_message,
+        agent_feedback=primary.result.agent_feedback,
+        hold=primary.result.hold,
+        advisory=primary.result.advisory,
+        escalated=tool_dispatch.result.escalated or text_dispatch.result.escalated,
+        redacted=tool_dispatch.result.redacted or text_dispatch.result.redacted,
+    )
+    return EnforcementDispatch(
+        result=result,
+        response=text_dispatch.response,
+        transport=primary.transport,
+        http_status=primary.http_status,
+        error_code=primary.error_code,
+    )
 
 
 def _redactable_request(data: dict) -> dict:
