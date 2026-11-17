@@ -63,6 +63,8 @@ def _rule_engine(event: dict[str, Any]) -> dict[str, Any]:
     score = 5
     reasons: list[str] = []
     advice = "ALLOW"
+    confidence = "CONFIDENT"
+    escalation_reason = None
     obligations = {"read_only": False, "max_autonomy": gov.get("requested_autonomy", "L1"),
                    "max_subagent_depth": 0, "allowed_tools": [], "denied_tools": []}
 
@@ -105,6 +107,9 @@ def _rule_engine(event: dict[str, Any]) -> dict[str, Any]:
         "reason_codes": reasons or ["NONE"],
         "explanation": f"rule-engine score={score}; factors={reasons or ['none']}",
         "suggested_obligations": obligations,
+        "confidence": confidence,
+        "ciso_reasoning": None,
+        "escalation_reason": escalation_reason,
     }
 
 
@@ -148,7 +153,14 @@ async def _llm_engine(event: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - any failure -> high risk
         return _fallback(f"LLM_ERROR:{type(exc).__name__}")
 
-    return _sanitize(parsed, bad_code="LLM_BAD_ADVICE_FIELD", default_reason="LLM_ADVICE")
+    advice = _sanitize(parsed, bad_code="LLM_BAD_ADVICE_FIELD", default_reason="LLM_ADVICE")
+
+    # Detect escalation signals in the explanation
+    if _should_escalate_to_human(parsed):
+        advice["confidence"] = "UNCERTAIN"
+        advice["escalation_reason"] = _extract_escalation_reason(parsed)
+
+    return advice
 
 
 def _sanitize(parsed: Any, *, bad_code: str, default_reason: str) -> dict[str, Any]:
@@ -174,6 +186,20 @@ def _sanitize(parsed: Any, *, bad_code: str, default_reason: str) -> dict[str, A
     so = parsed.get("suggested_obligations") or {}
     if not isinstance(so, dict):
         so = {}
+
+    # Handle confidence and escalation
+    confidence = parsed.get("confidence", "CONFIDENT")
+    if confidence not in {"CONFIDENT", "UNCERTAIN", "UNABLE_TO_ADVISE"}:
+        confidence = "CONFIDENT"
+
+    ciso_reasoning = parsed.get("ciso_reasoning")
+    if ciso_reasoning is not None:
+        ciso_reasoning = str(ciso_reasoning)[:1000]
+
+    escalation_reason = parsed.get("escalation_reason")
+    if escalation_reason is not None:
+        escalation_reason = str(escalation_reason)[:500]
+
     return {
         "advice": advice,
         "risk_score": score,
@@ -187,6 +213,9 @@ def _sanitize(parsed: Any, *, bad_code: str, default_reason: str) -> dict[str, A
             "allowed_tools": [str(x)[:64] for x in (so.get("allowed_tools") or [])][:50],
             "denied_tools": [str(x)[:64] for x in (so.get("denied_tools") or [])][:50],
         },
+        "confidence": confidence,
+        "ciso_reasoning": ciso_reasoning,
+        "escalation_reason": escalation_reason,
     }
 
 
@@ -284,6 +313,17 @@ async def _hermes_engine(event: dict[str, Any]) -> dict[str, Any]:
 
     advice = _sanitize(parsed, bad_code="CISO_HERMES_BAD_ADVICE", default_reason="CISO_HERMES_ADVICE")
     advice["reason_codes"] = (["CISO_HERMES"] + advice["reason_codes"])[:10]
+
+    # Capture CISO Hermes' reasoning from stdout (structured response + output)
+    raw_output = out.decode(errors="replace")
+    if not advice.get("ciso_reasoning"):
+        advice["ciso_reasoning"] = raw_output[:1000]
+
+    # Detect escalation signals
+    if _should_escalate_to_human(parsed):
+        advice["confidence"] = "UNCERTAIN"
+        advice["escalation_reason"] = _extract_escalation_reason(parsed)
+
     return advice
 
 
@@ -292,8 +332,34 @@ def _degrade(event: dict[str, Any], fallback: str, code: str) -> dict[str, Any]:
         adv = _rule_engine(event)
         adv["reason_codes"] = (["CISO_HERMES_FALLBACK_RULE", code] + adv["reason_codes"])[:10]
         adv["explanation"] = f"CISO hermes unavailable ({code}); rule engine used. " + adv.get("explanation", "")
+        adv["escalation_reason"] = code
         return adv
     return _fallback(code)
+
+
+def _should_escalate_to_human(advisor_response: dict[str, Any]) -> bool:
+    """Check if the advisor is uncertain and recommends human review."""
+    escalation_keywords = [
+        "無法確定", "unclear", "ambiguous", "uncertain", "不確定",
+        "new threat", "新型威脅", "邊界情況", "edge case", "需要人類",
+        "need human", "require human", "請人工", "人工審核", "人類決定",
+        "human review", "human decision", "prompt injection", "注入",
+    ]
+    explanation = str(advisor_response.get("explanation", "")).lower()
+    confidence = advisor_response.get("confidence", "").lower()
+    return (confidence in ("uncertain", "unable_to_advise") or
+            any(kw.lower() in explanation for kw in escalation_keywords))
+
+
+def _extract_escalation_reason(advisor_response: dict[str, Any]) -> str:
+    """Extract why escalation is needed."""
+    explanation = advisor_response.get("explanation", "")
+    escalation_reason = advisor_response.get("escalation_reason")
+    if escalation_reason:
+        return str(escalation_reason)[:500]
+    if explanation:
+        return str(explanation)[:500]
+    return "CISO uncertain about this decision"
 
 
 def _fallback(code: str) -> dict[str, Any]:
@@ -305,6 +371,9 @@ def _fallback(code: str) -> dict[str, Any]:
         "explanation": f"advisor could not produce a judgement ({code})",
         "suggested_obligations": {"read_only": True, "max_autonomy": "L0",
                                   "max_subagent_depth": 0, "allowed_tools": [], "denied_tools": ["*"]},
+        "confidence": "UNABLE_TO_ADVISE",
+        "ciso_reasoning": None,
+        "escalation_reason": code,
     }
 
 

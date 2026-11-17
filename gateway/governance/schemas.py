@@ -59,6 +59,7 @@ class Verdict(str, enum.Enum):
     DENY = "DENY"
     MODIFY = "MODIFY"
     REQUIRE_REVIEW = "REQUIRE_REVIEW"
+    REQUIRE_HUMAN_REVIEW = "REQUIRE_HUMAN_REVIEW"
 
 
 class RiskLevel(str, enum.Enum):
@@ -72,6 +73,12 @@ class AdviceAvailability(str, enum.Enum):
     OK = "OK"
     UNAVAILABLE = "UNAVAILABLE"          # timeout / transport error
     UNPARSEABLE = "UNPARSEABLE"          # returned something, not valid schema
+
+
+class AdviceConfidence(str, enum.Enum):
+    CONFIDENT = "CONFIDENT"              # CISO has high confidence
+    UNCERTAIN = "UNCERTAIN"              # edge case / new threat / ambiguous
+    UNABLE_TO_ADVISE = "UNABLE_TO_ADVISE"  # completely unable to judge
 
 
 # Autonomy / capability ladders are ordered; helpers below compare them.
@@ -174,6 +181,9 @@ class SoftAdvice(BaseModel):
     explanation: str = ""
     suggested_obligations: SuggestedObligations = Field(default_factory=SuggestedObligations)
     availability: AdviceAvailability = AdviceAvailability.OK
+    confidence: AdviceConfidence = AdviceConfidence.CONFIDENT
+    ciso_reasoning: Optional[str] = None
+    escalation_reason: Optional[str] = None
 
     @classmethod
     def unavailable(cls, why: AdviceAvailability, detail: str = "") -> "SoftAdvice":
@@ -227,7 +237,7 @@ class Decision(BaseModel):
 # --------------------------------------------------------------------------- #
 class AgentFeedback(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["REPLAN", "STOP_AUTO_REPLAN", "PROCEED_MODIFIED"] = "REPLAN"
+    action: Literal["REPLAN", "STOP_AUTO_REPLAN", "PROCEED_MODIFIED", "PRESENT_MENU"] = "REPLAN"
     blocked_action: Optional[str] = None
     reason_code: Optional[str] = None
     allowed_alternatives: list[str] = Field(default_factory=list)
@@ -237,7 +247,7 @@ class AgentFeedback(BaseModel):
 
 class EnforcementResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    outcome: Literal["ALLOW", "DENY", "MODIFY", "REQUIRE_REVIEW"]
+    outcome: Literal["ALLOW", "DENY", "MODIFY", "REQUIRE_REVIEW", "REQUIRE_HUMAN_REVIEW"]
     event_id: str
     reason_codes: list[str] = Field(default_factory=list)
     # Human-facing, Traditional Chinese, always shown to the user on DENY.

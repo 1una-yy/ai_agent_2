@@ -483,6 +483,13 @@ review_reasons contains "SOFT_ADVICE_DENY" if {
 	soft.risk_level != "CRITICAL"
 }
 
+# CISO is uncertain about this decision — escalate to human review
+review_reasons contains "CISO_UNCERTAIN" if {
+	soft != null
+	soft.availability == "OK"
+	soft.confidence == "UNCERTAIN"
+}
+
 autonomy_over_ceiling if {
 	is_spawn
 	capability_known

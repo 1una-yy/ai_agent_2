@@ -333,6 +333,24 @@ class Enforcer:
                 transport="inband",
             )
 
+        if verdict == Verdict.REQUIRE_REVIEW:
+            # Check if this is CISO_UNCERTAIN case -> present menu instead of blocking
+            ciso_uncertain = (sa and sa.confidence.value == "UNCERTAIN" if hasattr(sa.confidence, "value")
+                            else sa and str(sa.confidence) == "UNCERTAIN")
+
+            if ciso_uncertain:
+                # Present human review menu with options
+                pub = public_code(all_reason_codes)
+                return _present_human_review_menu(
+                    event=worst.event,
+                    decision=worst.decision,
+                    reason_codes=all_reason_codes,
+                    soft_advice=sa,
+                    ciso_note=ciso_note,
+                    pub_code=pub,
+                    event_id=event_id,
+                )
+
         if verdict == Verdict.MODIFY:
             before = _snapshot_tool_calls(raw_response)
             modified = self.adapter.enforce(raw_response, worst.decision)
@@ -443,6 +461,104 @@ class Enforcer:
 # --------------------------------------------------------------------------- #
 # response shaping helpers (OpenAI chat-completion schema)
 # --------------------------------------------------------------------------- #
+def _present_human_review_menu(
+    *,
+    event,
+    decision,
+    reason_codes: list[str],
+    soft_advice,
+    ciso_note,
+    pub_code: str,
+    event_id: str,
+) -> EnforcementDispatch:
+    """When CISO is uncertain, present a menu of options for human decision."""
+    menu_options = [
+        {
+            "action": "allow",
+            "label": "允許執行",
+            "description": "批准這項操作，套用 CISO 建議的義務限制",
+            "risk": soft_advice.risk_level.value if hasattr(soft_advice.risk_level, "value") else str(soft_advice.risk_level),
+            "requires_approval_token": True,
+        },
+        {
+            "action": "deny",
+            "label": "拒絕",
+            "description": "擋下這項操作，Hermes 可以重新規劃",
+            "risk": "blocked",
+            "requires_approval_token": False,
+        },
+        {
+            "action": "modify",
+            "label": "修改後執行",
+            "description": "人類指定修改內容，然後執行",
+            "risk": "conditional",
+            "requires_approval_token": True,
+        },
+    ]
+
+    result = EnforcementResult(
+        outcome="REQUIRE_HUMAN_REVIEW",
+        event_id=event_id,
+        reason_codes=[*reason_codes, "CISO_UNCERTAIN"],
+        hold="REVIEW_HOLD",
+        user_message=(
+            f"這項操作需要人類決策。\n\n"
+            f"CISO 信心度：不確定\n"
+            f"原因：{soft_advice.escalation_reason or '需要人類審查'}\n\n"
+            f"請選擇下列選項之一。"
+        ),
+        advisory={
+            "ciso_reasoning": soft_advice.ciso_reasoning or None,
+            "escalation_reason": soft_advice.escalation_reason or None,
+            "risk_score": soft_advice.risk_score,
+            "risk_level": soft_advice.risk_level.value if hasattr(soft_advice.risk_level, "value") else str(soft_advice.risk_level),
+        },
+        ciso=ciso_note,
+        session_continues=True,
+    )
+
+    # Encode menu in a structured response
+    response_body = {
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": result.user_message,
+                },
+                "dciso_governance": {
+                    "status": "REQUIRE_HUMAN_REVIEW",
+                    "event_id": event_id,
+                    "menu_options": menu_options,
+                    "ciso_analysis": {
+                        "reasoning": soft_advice.ciso_reasoning,
+                        "escalation_reason": soft_advice.escalation_reason,
+                        "confidence": "UNCERTAIN",
+                        "risk_score": soft_advice.risk_score,
+                    },
+                    "agent_feedback": {
+                        "action": "PRESENT_MENU",
+                        "reason_code": pub_code,
+                        "event_id": event_id,
+                    },
+                },
+            }
+        ],
+        "dciso_governance": {
+            "status": "REQUIRE_HUMAN_REVIEW",
+            "event_id": event_id,
+            "menu_options": menu_options,
+        },
+    }
+
+    return EnforcementDispatch(
+        result=result,
+        response=response_body,
+        transport="inband",
+    )
+
+
 def _snapshot_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
     for choice in response.get("choices", []) or []:

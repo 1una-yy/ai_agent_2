@@ -1,0 +1,116 @@
+2026-11-16 14:17:37,214 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:37,457 WARNING tools.registry: check_fn _browser_dialog_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:37,458 WARNING tools.registry: check_fn is_browser_use_cli_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,069 WARNING agent.auxiliary_client: Auxiliary client: PAID lane engaged for auxiliary task — OpenRouter fallback model 'google/gemini-3.6-flash' is not a :free SKU and may incur real spend. Set auxiliary.free_only: true to restrict auxiliary fallbacks to free models, or auxiliary.openrouter_model to a :free model.
+2026-11-16 14:17:38,071 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,074 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:17:38,074 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,074 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:17:38,080 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,084 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:17:38,084 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,084 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:17:38,084 WARNING tools.registry: check_fn check_browser_vision_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,092 WARNING tools.registry: check_fn check_image_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,093 WARNING tools.registry: check_fn _check_kanban_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,094 WARNING tools.registry: check_fn _check_kanban_orchestrator_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,180 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,182 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:17:38,183 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,183 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:17:38,188 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,190 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:17:38,191 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:18:38.
+2026-11-16 14:17:38,191 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:17:38,191 WARNING tools.registry: check_fn check_vision_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,265 WARNING tools.registry: check_fn _a2a_tools_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,265 WARNING tools.registry: check_fn check_discord_tool_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,265 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,266 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,276 WARNING tools.registry: check_fn _check_yuanbao returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,276 WARNING tools.registry: check_fn _check_ha_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,278 WARNING tools.registry: check_fn _check_spotify_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,287 WARNING tools.registry: check_fn check_video_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,288 WARNING tools.registry: check_fn _check_xai_video_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:17:38,293 WARNING tools.registry: check_fn check_x_search_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,609 WARNING tools.registry: check_fn _a2a_tools_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,859 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,887 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,953 WARNING tools.registry: check_fn _browser_dialog_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,955 WARNING tools.registry: check_fn is_browser_use_cli_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,957 WARNING tools.registry: check_fn check_discord_tool_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,957 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,957 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,975 WARNING tools.registry: check_fn _check_yuanbao returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,975 WARNING tools.registry: check_fn _check_ha_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,984 WARNING tools.registry: check_fn check_image_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,985 WARNING tools.registry: check_fn _check_kanban_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,986 WARNING tools.registry: check_fn _check_kanban_orchestrator_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:00,989 WARNING tools.registry: check_fn _check_spotify_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:01,052 WARNING agent.auxiliary_client: Auxiliary client: PAID lane engaged for auxiliary task — OpenRouter fallback model 'google/gemini-3.6-flash' is not a :free SKU and may incur real spend. Set auxiliary.free_only: true to restrict auxiliary fallbacks to free models, or auxiliary.openrouter_model to a :free model.
+2026-11-16 14:35:01,054 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,058 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:35:01,059 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,059 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:35:01,064 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,071 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:35:01,071 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,071 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:35:01,071 WARNING tools.registry: check_fn check_vision_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:01,085 WARNING tools.registry: check_fn check_video_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:01,086 WARNING tools.registry: check_fn _check_xai_video_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:01,113 WARNING tools.registry: check_fn check_x_search_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:35:01,458 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,461 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:35:01,461 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,461 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:35:01,466 WARNING agent.auxiliary_client: Auxiliary: marking openrouter unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,469 WARNING agent.auxiliary_client: Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).
+2026-11-16 14:35:01,469 WARNING agent.auxiliary_client: Auxiliary: marking nous unhealthy for 60s (payment / credit error). Subsequent auxiliary calls will skip it until 14:36:01.
+2026-11-16 14:35:01,469 WARNING agent.auxiliary_client: resolve_provider_client: nous requested but Nous Portal not configured (run: hermes auth)
+2026-11-16 14:35:01,469 WARNING tools.registry: check_fn check_browser_vision_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:55,715 WARNING cli: Background MCP discovery previously exited with no connected servers; retrying discovery thread
+2026-11-16 14:37:56,285 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:56,569 WARNING tools.registry: check_fn _browser_dialog_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:56,570 WARNING tools.registry: check_fn is_browser_use_cli_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:57,075 WARNING tools.registry: check_fn check_image_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:57,076 WARNING tools.registry: check_fn _check_kanban_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:57,077 WARNING tools.registry: check_fn _check_kanban_orchestrator_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:37:57,133 WARNING agent.model_metadata: Could not determine context length for model 'governed-model' (base_url=http://127.0.0.1:4000/v1) — falling back to 256,000 tokens. Set model.context_length in config.yaml to override.
+2026-11-16 14:55:29,791 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:30,135 WARNING tools.registry: check_fn _browser_dialog_check returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:30,135 WARNING tools.registry: check_fn is_browser_use_cli_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,206 WARNING tools.registry: check_fn check_image_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,206 WARNING tools.registry: check_fn _check_kanban_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,207 WARNING tools.registry: check_fn _check_kanban_orchestrator_mode returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,371 WARNING agent.model_metadata: Could not determine context length for model 'governed-model' (base_url=http://127.0.0.1:4000/v1) — falling back to 256,000 tokens. Set model.context_length in config.yaml to override.
+2026-11-16 14:55:31,372 WARNING tools.registry: check_fn _a2a_tools_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,373 WARNING tools.registry: check_fn check_discord_tool_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,373 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,373 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,385 WARNING tools.registry: check_fn _check_yuanbao returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,385 WARNING tools.registry: check_fn _check_ha_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,386 WARNING tools.registry: check_fn _check_spotify_available returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,388 WARNING tools.registry: check_fn check_video_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,389 WARNING tools.registry: check_fn _check_xai_video_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:31,390 WARNING tools.registry: check_fn check_x_search_requirements returned False; dependent tools will be unavailable this turn
+2026-11-16 14:55:54,774 WARNING cli: Background MCP discovery previously exited with no connected servers; retrying discovery thread
+2026-11-17 10:11:01,539 WARNING tools.registry: check_fn _a2a_tools_available returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,399 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,578 WARNING tools.registry: check_fn _browser_cdp_check returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,834 WARNING tools.registry: check_fn _browser_dialog_check returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,838 WARNING tools.registry: check_fn is_browser_use_cli_mode returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,855 WARNING tools.registry: check_fn check_discord_tool_requirements returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,860 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,861 WARNING tools.registry: check_fn _check_feishu returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,990 WARNING tools.registry: check_fn _check_yuanbao returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:03,995 WARNING tools.registry: check_fn _check_ha_available returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:04,016 WARNING tools.registry: check_fn check_image_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:04,022 WARNING tools.registry: check_fn _check_kanban_mode returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:04,022 WARNING tools.registry: check_fn _check_kanban_orchestrator_mode returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:04,023 WARNING tools.registry: check_fn _check_spotify_available returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:08,358 WARNING tools.registry: check_fn check_video_generation_requirements returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:08,359 WARNING tools.registry: check_fn _check_xai_video_requirements returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:08,392 WARNING tools.registry: check_fn check_x_search_requirements returned False; dependent tools will be unavailable this turn
+2026-11-17 10:11:08,769 WARNING agent.model_metadata: Could not determine context length for model 'governed-model' (base_url=http://127.0.0.1:4000/v1) — falling back to 256,000 tokens. Set model.context_length in config.yaml to override.
+2026-11-17 10:11:15,812 WARNING cli: Background MCP discovery previously exited with no connected servers; retrying discovery thread
